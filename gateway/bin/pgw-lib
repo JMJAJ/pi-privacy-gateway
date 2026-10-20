@@ -1,0 +1,130 @@
+#!/bin/bash
+# Shared settings and helpers for the pgw-* scripts. Sourced, not executed.
+
+VPN_SUBNET="${VPN_SUBNET:-10.13.13.0/24}"
+VPN_PREFIX="${VPN_SUBNET%.*}"            # 10.13.13
+VPN_IP="${VPN_PREFIX}.1"                 # the gateway's address inside the VPN
+WG_PORT="${WG_PORT:-51820}"
+PROVIDER_NAME="${PROVIDER_NAME:-Provider}"
+WARP_FWMARK=51820                        # packets with this mark bypass the WARP routing rule
+PROVIDER_TABLE=2020
+CFG=/config
+WG=/etc/wireguard                        # real path: AppArmor confines wg-quick to it
+
+log() { echo "[pgw] $*"; logger -t pgw "$*" 2>/dev/null || true; }
+
+# LAN address peers connect to (override with PUBLIC_ENDPOINT, e.g. a DynDNS name)
+lan_ip() {
+  local dev
+  dev=$(ip -4 route show default table main | awk '{for (i=1;i<NF;i++) if ($i=="dev") {print $(i+1); exit}}')
+  ip -4 -o addr show dev "$dev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1
+}
+
+# first value of "Key = value" in a wg config (multiple lines are joined with ", ")
+cfg_get() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$2" | paste -sd, - | sed 's/,/, /g; s/[[:space:]]*$//'; }
+
+resolve4() {  # resolve host:port to ipv4:port once, so tunnels never need DNS at boot
+  local host=${1%:*} port=${1##*:} ip
+  if [[ $host =~ ^[0-9.]+$ ]]; then echo "$1"; return; fi
+  ip=$(getent ahostsv4 "$host" | awk 'NR==1{print $1}')
+  echo "${ip:-$host}:$port"
+}
+
+make_server() {
+  log "creating VPN server keys ($VPN_SUBNET, UDP $WG_PORT)"
+  cat > "$WG/wg1.conf" <<EOF
+# VPN server for your devices. Add devices with:  docker compose exec gateway pgw add-peer <name>
+[Interface]
+PrivateKey = $(wg genkey)
+Address = $VPN_IP/24
+ListenPort = $WG_PORT
+MTU = 1280
+PostUp = iptables -t nat -A POSTROUTING -s $VPN_SUBNET -o wg0 -j MASQUERADE; iptables -t mangle -A FORWARD -i wg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = iptables -t nat -D POSTROUTING -s $VPN_SUBNET -o wg0 -j MASQUERADE; iptables -t mangle -D FORWARD -i wg1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+EOF
+}
+
+# Cloudflare WARP as the default exit. Routing uses FIXED rule priorities 98/99 so the
+# exit-mode rule (95) always wins, whatever order things start in.
+make_warp() {
+  if [ "${PGW_TEST:-}" = 1 ]; then   # CI/smoke tests: offline stand-in, never used for real traffic
+    log "PGW_TEST: using an offline dummy WARP config"
+    printf '[Interface]\nPrivateKey = %s\nAddress = 172.16.0.2/32\nMTU = 1280\n[Peer]\nPublicKey = %s\nAllowedIPs = 0.0.0.0/0\nEndpoint = 127.0.0.1:9\n' \
+      "$(wg genkey)" "$(wg genkey | wg pubkey)" > "$CFG/warp/wgcf-profile.conf"
+  else
+    log "registering a free Cloudflare WARP account (wgcf)"
+    ( cd "$CFG/warp" && { [ -f wgcf-account.toml ] || wgcf register --accept-tos; } && wgcf generate ) >/dev/null || return 1
+  fi
+  _write_warp
+}
+
+_write_warp() {
+  local p="$CFG/warp/wgcf-profile.conf" mtu
+  mtu=$(cfg_get MTU "$p"); mtu=${mtu:-1280}
+  cat > "$WG/wg0.conf" <<EOF
+# Cloudflare WARP - default exit, and the outer layer for the provider/Tor modes.
+[Interface]
+PrivateKey = $(cfg_get PrivateKey "$p")
+Address = $(cfg_get Address "$p")
+MTU = $mtu
+Table = off
+FwMark = $WARP_FWMARK
+PostUp = ip route replace default dev wg0 table $WARP_FWMARK; ip rule add priority 98 table main suppress_prefixlength 0; ip rule add priority 99 not fwmark $WARP_FWMARK table $WARP_FWMARK; ip -6 route replace default dev wg0 table $WARP_FWMARK || true; ip -6 rule add priority 98 table main suppress_prefixlength 0 || true; ip -6 rule add priority 99 not fwmark $WARP_FWMARK table $WARP_FWMARK || true; iptables -t mangle -A FORWARD -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ip rule del priority 98; ip rule del priority 99; ip -6 rule del priority 98 || true; ip -6 rule del priority 99 || true; iptables -t mangle -D FORWARD -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+
+[Peer]
+PublicKey = $(cfg_get PublicKey "$p")
+AllowedIPs = 0.0.0.0/0, ::/0
+Endpoint = $(resolve4 "$(cfg_get Endpoint "$p")")
+PersistentKeepalive = 25
+EOF
+}
+
+# Any WireGuard VPN provider (Proton, Mullvad, IVPN, ...): drop its config at
+# /config/provider.conf. It runs INSIDE WARP: Cloudflare sees only encrypted traffic
+# to the provider, the provider never sees your home IP.
+make_provider() {
+  local p="$CFG/provider.conf" mtu psk
+  mtu=$(( $(cfg_get MTU "$WG/wg0.conf" || echo 1280) - 80 ))
+  psk=$(cfg_get PresharedKey "$p")
+  log "importing provider config as wg2 ($PROVIDER_NAME, MTU $mtu)"
+  cat > "$WG/wg2.conf" <<EOF
+# $PROVIDER_NAME - generated from /config/provider.conf (edit that file, not this one)
+[Interface]
+PrivateKey = $(cfg_get PrivateKey "$p")
+Address = $(cfg_get Address "$p" | cut -d, -f1)
+MTU = $mtu
+Table = off
+PostUp = ip route replace default dev wg2 table $PROVIDER_TABLE; ip rule add priority 96 oif wg2 lookup $PROVIDER_TABLE; iptables -t nat -A POSTROUTING -s $VPN_SUBNET -o wg2 -j MASQUERADE; iptables -t mangle -A FORWARD -o wg2 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ip rule del priority 96 oif wg2 lookup $PROVIDER_TABLE; iptables -t nat -D POSTROUTING -s $VPN_SUBNET -o wg2 -j MASQUERADE; iptables -t mangle -D FORWARD -o wg2 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+
+[Peer]
+PublicKey = $(cfg_get PublicKey "$p")
+${psk:+PresharedKey = $psk}
+AllowedIPs = 0.0.0.0/0, ::/0
+Endpoint = $(resolve4 "$(cfg_get Endpoint "$p")")
+PersistentKeepalive = 25
+EOF
+}
+
+make_torrc() {
+  cat > "$CFG/tor/torrc" <<EOF
+# generated by pgw-entrypoint
+DataDirectory /config/tor/data
+SocksPort 127.0.0.1:9050
+ControlPort 127.0.0.1:9051
+CookieAuthentication 1
+CookieAuthFile /run/tor/control.authcookie
+CookieAuthFileGroupReadable 1
+# transparent proxy for VPN devices in "tor" mode (the kill switch only lets wg1 reach it)
+TransPort 0.0.0.0:9040 IsolateClientAddr IsolateDestAddr
+DNSPort 127.0.0.1:9053
+AutomapHostsOnResolve 1
+VirtualAddrNetworkIPv4 10.192.0.0/10
+Log notice stdout
+EOF
+}
+
+valid_name() { [[ $1 =~ ^[A-Za-z0-9_-]{1,32}$ ]]; }
+
+peer_names() { sed -n 's/^# Name: //p' "$WG/wg1.conf"; }

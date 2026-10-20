@@ -1,0 +1,109 @@
+#!/bin/bash
+# pgw - manage the gateway.  Run inside the container:  docker compose exec gateway pgw <command>
+set -uo pipefail
+. /usr/local/bin/pgw-lib
+
+usage() {
+  cat <<EOF
+pgw - Pi Privacy Gateway
+
+  pgw add-peer <name>      add a device; prints a QR code to scan with the WireGuard app
+  pgw qr <name>            show a device's QR code again
+  pgw list                 list devices and when they last connected
+  pgw remove-peer <name>   revoke a device
+  pgw mode [warp|provider|tor]   show or switch the exit for all devices
+  pgw status               health overview
+EOF
+}
+
+reload_server() { wg syncconf wg1 <(wg-quick strip wg1); }
+
+add_peer() {
+  local name=${1:-} n ip priv psk endpoint
+  valid_name "$name" || { echo "name must be 1-32 letters, digits, - or _" >&2; exit 2; }
+  peer_names | grep -qx "$name" && { echo "device '$name' already exists" >&2; exit 2; }
+  for n in $(seq 2 254); do
+    grep -q "AllowedIPs = ${VPN_PREFIX}.$n/32" "$WG/wg1.conf" || { ip="${VPN_PREFIX}.$n"; break; }
+  done
+  [ -n "${ip:-}" ] || { echo "subnet full" >&2; exit 1; }
+  priv=$(wg genkey); psk=$(wg genpsk)
+  umask 077
+  cat >> "$WG/wg1.conf" <<EOF
+
+[Peer]
+# Name: $name
+PublicKey = $(echo "$priv" | wg pubkey)
+PresharedKey = $psk
+AllowedIPs = $ip/32
+EOF
+  endpoint="${PUBLIC_ENDPOINT:-$(lan_ip)}"
+  cat > "$CFG/peers/$name.conf" <<EOF
+[Interface]
+PrivateKey = $priv
+Address = $ip/32
+DNS = $VPN_IP
+MTU = 1280
+
+[Peer]
+PublicKey = $(cfg_get PrivateKey "$WG/wg1.conf" | head -n1 | wg pubkey)
+PresharedKey = $psk
+Endpoint = $endpoint:$WG_PORT
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+EOF
+  qrencode -t PNG -s 8 -m 2 -o "$CFG/peers/$name.png" < "$CFG/peers/$name.conf"
+  reload_server
+  echo "Added '$name' as $ip (connects to $endpoint:$WG_PORT)."
+  echo "Scan this with the WireGuard app (+ > Scan from QR code):"
+  qrencode -t ansiutf8 < "$CFG/peers/$name.conf"
+  echo "Config file: /config/peers/$name.conf  (contains the device's private key - keep it private)"
+}
+
+remove_peer() {
+  local name=${1:-}
+  peer_names | grep -qx "$name" || { echo "no device '$name'" >&2; exit 2; }
+  # drop the [Peer] block that carries "# Name: <name>"
+  awk -v n="# Name: $name" '
+    /^\[Peer\]/ { if (blk != "" && !skip) printf "%s", blk; blk = $0 "\n"; skip = 0; inpeer = 1; next }
+    inpeer { blk = blk $0 "\n"; if ($0 == n) skip = 1; next }
+    { print }
+    END { if (blk != "" && !skip) printf "%s", blk }' "$WG/wg1.conf" > "$WG/wg1.conf.new" && mv "$WG/wg1.conf.new" "$WG/wg1.conf"
+  rm -f "$CFG/peers/$name.conf" "$CFG/peers/$name.png"
+  reload_server
+  echo "Removed '$name'. Its key no longer works."
+}
+
+list_peers() {
+  printf '%-16s %-15s %s\n' DEVICE ADDRESS "LAST HANDSHAKE"
+  local now; now=$(date +%s)
+  awk '/^# Name: /{n=$3} /^PublicKey/{k=$3} /^AllowedIPs/{print n, k, $3}' "$WG/wg1.conf" |
+  while read -r name key ip; do
+    [ -n "$name" ] || continue
+    hs=$(wg show wg1 latest-handshakes 2>/dev/null | awk -v k="$key" '$1==k{print $2}')
+    if [ -n "$hs" ] && [ "$hs" -gt 0 ]; then ago="$(( now - hs ))s ago"; else ago=never; fi
+    printf '%-16s %-15s %s\n' "$name" "${ip%/32}" "$ago"
+  done
+}
+
+status() {
+  local quiet=${1:-} ok=0 l
+  check() { if eval "$2" >/dev/null 2>&1; then [ -n "$quiet" ] || printf '  ok    %s\n' "$1"; else ok=1; [ -n "$quiet" ] || printf '  FAIL  %s\n' "$1"; fi; }
+  [ -n "$quiet" ] || echo "exit mode: $(pgw-exit status)"
+  check "VPN server (wg1)"        "ip link show wg1"
+  check "kill switch armed"       "iptables -C FORWARD -j PIX_FWD"
+  check "WARP tunnel (wg0)"       "ip link show wg0"
+  [ -f "$WG/wg2.conf" ] && check "$PROVIDER_NAME tunnel (wg2)" "ip link show wg2"
+  check "Tor running"             "ss -ltn | grep -q '127.0.0.1:9050 '"
+  [ -n "$quiet" ] || { l=$(curl -s -m 8 https://1.1.1.1/cdn-cgi/trace | sed -n 's/^ip=//p'); echo "gateway's own exit IP: ${l:-unreachable}"; }
+  return $ok
+}
+
+case "${1:-}" in
+  add-peer)    add_peer "${2:-}" ;;
+  qr)          [ -f "$CFG/peers/${2:-x}.conf" ] && qrencode -t ansiutf8 < "$CFG/peers/$2.conf" || { echo "no device '${2:-}'" >&2; exit 2; } ;;
+  list)        list_peers ;;
+  remove-peer) remove_peer "${2:-}" ;;
+  mode)        if [ -n "${2:-}" ]; then pgw-exit set "$2"; else pgw-exit status; fi ;;
+  status)      [ "${2:-}" = --quiet ] && status q || status ;;
+  *)           usage ;;
+esac

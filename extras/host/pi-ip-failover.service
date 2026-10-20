@@ -1,0 +1,12 @@
+[Unit]
+Description=Keep the gateway LAN address on a working radio
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+ExecStart=/usr/local/sbin/pi-ip-failover
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

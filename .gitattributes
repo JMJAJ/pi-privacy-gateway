@@ -1,0 +1,5 @@
+# Linux scripts must keep LF endings (a CR breaks them inside the container)
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.vbs text eol=crlf
+*.png binary

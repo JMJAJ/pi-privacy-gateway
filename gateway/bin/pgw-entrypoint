@@ -1,0 +1,35 @@
+#!/bin/bash
+# Container start: create missing configs, arm the kill switch, bring the tunnels up,
+# then hand over to supervisord (reconcile loop, Tor, dashboard).
+set -uo pipefail
+. /usr/local/bin/pgw-lib
+
+sysctl -qw net.ipv4.ip_forward=1 net.ipv4.conf.all.src_valid_mark=1 || log "WARNING: could not set sysctls (is the container privileged?)"
+modprobe wireguard 2>/dev/null || true
+ip link add pgw-probe type wireguard 2>/dev/null && ip link del pgw-probe || {
+  log "ERROR: this kernel has no WireGuard support (needs Linux 5.6+)"; exit 1; }
+
+mkdir -p "$WG" "$CFG/peers" "$CFG/warp" "$CFG/tor/data" /run/pgw /run/tor
+chmod 700 "$WG" "$CFG/peers" "$CFG/warp"
+chown -R debian-tor:debian-tor "$CFG/tor/data" /run/tor && chmod 700 "$CFG/tor/data" && chmod 755 "$CFG/tor"
+umask 077
+
+[ -f "$WG/wg1.conf" ] || make_server
+[ -f "$WG/wg0.conf" ] || make_warp || { log "ERROR: WARP registration failed (no internet?)"; exit 1; }
+if [ -f "$CFG/provider.conf" ]; then make_provider; else rm -f "$WG/wg2.conf"; fi
+make_torrc && chmod 644 "$CFG/tor/torrc"   # no secrets; Tor runs as its own user
+[ -f "$CFG/mode" ] || echo "${DEFAULT_MODE:-warp}" > "$CFG/mode"
+
+# Kill switch BEFORE the VPN server comes up: devices can never leave unprotected.
+pgw-exit firewall
+
+# Interfaces live in the host's network namespace and survive container restarts,
+# so always start from a clean slate. WARP first (the provider tunnel runs inside it).
+for i in wg0 wg2 wg1; do
+  [ -f "$WG/$i.conf" ] || continue
+  wg-quick down "$i" >/dev/null 2>&1 || ip link del "$i" 2>/dev/null || true
+  wg-quick up "$i" >/dev/null 2>&1 && log "$i up" || log "WARNING: $i failed to start - will retry"
+done
+
+log "VPN server ready on UDP $WG_PORT. Add a device: docker compose exec gateway pgw add-peer phone"
+exec /usr/bin/supervisord -c /etc/supervisor/conf.d/pgw.conf
