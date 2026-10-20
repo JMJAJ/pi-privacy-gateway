@@ -5,7 +5,7 @@
 # the internet: startup, kill switch, routing rules, device management, mode switching
 # failing closed, and the dashboard API.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 IMG=pgw-smoke:test
 C=pgw-smoke
 pass=0 fail=0
