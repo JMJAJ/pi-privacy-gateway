@@ -161,14 +161,16 @@ tor_ready() {
   return 1
 }
 
-apply() {
-  local default
+apply() {   # $1 = --nowait: background loop - never stall it waiting for Tor or the provider
+  local default nowait=${1:-}
   default=$(saved_mode)
   firewall   # first: the kill switch is never open while we wait for a tunnel
-  if uses tor && ! tor_ready; then log "Tor not ready - its devices stay blocked until it connects"; return 1; fi
-  # with failover on, don't block here: the reconcile loop notices a dead provider within ~10 s
-  if uses provider && [ "${EXIT_FAILOVER:-off}" != warp ] && ! tunnel_ready wg2; then
-    log "$PROVIDER_NAME not reachable - its devices stay blocked until it connects"; return 1
+  if [ -z "$nowait" ]; then   # interactive switch: wait so the caller learns whether the exit works
+    if uses tor && ! tor_ready; then log "Tor not ready - its devices stay blocked until it connects"; return 1; fi
+    # with failover on, don't block here: the reconcile loop notices a dead provider within ~10 s
+    if uses provider && [ "${EXIT_FAILOVER:-off}" != warp ] && ! tunnel_ready wg2; then
+      log "$PROVIDER_NAME not reachable - its devices stay blocked until it connects"; return 1
+    fi
   fi
   adguard_dns "$(effective "$default")"
   { echo "$default"; overrides; cat /run/pgw/failover 2>/dev/null; } | md5sum | cut -c1-12 > /run/pgw/applied
@@ -184,7 +186,7 @@ case "${1:-status}" in
   configured) configured "${2:-}" ;;
   devices)  overrides ;;
   firewall) firewall ;;
-  apply)    apply ;;
+  apply)    apply "${2:-}" ;;
   set)
     valid_mode "${2:-}" || { echo "usage: pgw-exit set warp|provider|tor" >&2; exit 2; }
     [ "$2" != provider ] || [ -f "$WG/wg2.conf" ] || { echo "no provider configured: put its WireGuard config at /config/provider.conf and restart" >&2; exit 2; }

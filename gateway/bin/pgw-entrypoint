@@ -15,6 +15,9 @@ ip link add pgw-probe type wireguard 2>/dev/null && ip link del pgw-probe || {
 
 mkdir -p "$WG" "$CFG/peers" "$CFG/warp" "$CFG/tor/data" /run/pgw /run/tor
 chmod 700 "$WG" "$CFG/peers" "$CFG/warp"
+# /config itself: traversable (not listable) so Tor, which runs as its own user, reaches /config/tor;
+# everything secret below it is 0600/0700
+chmod 711 "$CFG"; chmod 600 "$CFG"/provider.conf "$CFG"/history.db "$CFG"/device-modes 2>/dev/null || true
 chown -R debian-tor:debian-tor "$CFG/tor/data" /run/tor && chmod 700 "$CFG/tor/data" && chmod 755 "$CFG/tor"
 umask 077
 
