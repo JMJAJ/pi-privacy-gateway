@@ -1,0 +1,12 @@
+# secrets and runtime state - never commit
+.env
+data/
+*.conf.bak
+*.pem
+*.key
+
+# local tooling
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db

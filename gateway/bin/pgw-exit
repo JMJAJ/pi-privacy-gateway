@@ -1,0 +1,120 @@
+#!/bin/bash
+# pgw-exit - where VPN device traffic (wg1) leaves the gateway, plus an always-on kill switch.
+#   pgw-exit status                    print current mode
+#   pgw-exit set warp|provider|tor     switch mode (persists)
+#   pgw-exit apply                     re-apply the saved mode
+#   pgw-exit firewall                  (re)arm the kill switch for the saved mode only
+#
+# warp:     devices -> Cloudflare WARP (wg0). Anything else is rejected.
+# provider: devices -> your WireGuard VPN provider (wg2), which runs inside WARP. Anything else is rejected.
+# tor:      all device TCP -> Tor's transparent proxy; DNS -> AdGuard -> Tor. All other forwarding is
+#           rejected (UDP/QUIC/ICMP can't bypass Tor; browsers fall back to TCP).
+set -u
+. /usr/local/bin/pgw-lib
+MODE_FILE="$CFG/mode"
+ADGUARD_URL="${ADGUARD_URL:-http://127.0.0.1:3000}"
+TOR_TRANS=9040
+TOR_DNS=127.0.0.1:9053
+WARP_UPSTREAMS='["https://dns.quad9.net/dns-query","https://cloudflare-dns.com/dns-query"]'
+WARP_FALLBACK='["https://dns.mullvad.net/dns-query"]'
+
+saved_mode() { local m; m=$(cat "$MODE_FILE" 2>/dev/null); case "$m" in tor|provider) echo "$m" ;; *) echo warp ;; esac; }
+
+firewall() {
+  # one rebuild at a time (reconcile loop vs. a manual switch); never held while waiting for tunnels
+  mkdir -p /run/pgw; exec 9>/run/pgw/firewall.lock; flock -w 15 9
+  _firewall "$1"
+  exec 9>&-
+}
+
+_firewall() {
+  # dedicated chains, inserted first: never touches ufw/docker rules
+  iptables -N PIX_FWD 2>/dev/null || iptables -F PIX_FWD
+  iptables -C FORWARD -j PIX_FWD 2>/dev/null || iptables -I FORWARD 1 -j PIX_FWD
+  iptables -t nat -N PIX_NAT 2>/dev/null || iptables -t nat -F PIX_NAT
+  iptables -t nat -C PREROUTING -j PIX_NAT 2>/dev/null || iptables -t nat -I PREROUTING 1 -j PIX_NAT
+  ip6tables -N PIX_FWD 2>/dev/null || ip6tables -F PIX_FWD
+  ip6tables -C FORWARD -j PIX_FWD 2>/dev/null || ip6tables -I FORWARD 1 -j PIX_FWD
+  ip6tables -A PIX_FWD -i wg1 -j REJECT
+  # what VPN devices may reach on the gateway itself (works even if the host runs ufw/firewalld)
+  iptables -N PIX_IN 2>/dev/null || iptables -F PIX_IN
+  iptables -C INPUT -j PIX_IN 2>/dev/null || iptables -I INPUT 1 -j PIX_IN
+  iptables -A PIX_IN -p udp --dport "$WG_PORT" -j ACCEPT
+  iptables -A PIX_IN -i wg1 -p udp --dport 53 -j ACCEPT
+  iptables -A PIX_IN -i wg1 -p tcp -m multiport --dports 53,"${DASHBOARD_PORT:-80}" -j ACCEPT
+  iptables -A PIX_IN -i wg1 -p icmp -j ACCEPT
+
+  while ip rule del priority 95 2>/dev/null; do :; done
+  # replies back to devices (ACCEPT, not RETURN: hosts running Docker default FORWARD to DROP)
+  iptables -A PIX_FWD -o wg1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  case "$1" in
+    tor)      iptables -t nat -A PIX_NAT -i wg1 -p tcp ! -d "$VPN_IP" -j REDIRECT --to-ports $TOR_TRANS
+              iptables -A PIX_IN -i wg1 -p tcp --dport $TOR_TRANS -j ACCEPT ;;
+    provider) ip rule add priority 95 iif wg1 lookup $PROVIDER_TABLE
+              iptables -A PIX_FWD -i wg1 -o wg2 -j ACCEPT ;;
+    *)        iptables -A PIX_FWD -i wg1 -o wg0 -j ACCEPT ;;
+  esac
+  # kill switch: whatever was not explicitly allowed above never reaches the LAN/ISP
+  iptables -A PIX_FWD -i wg1 -p tcp -j REJECT --reject-with tcp-reset
+  iptables -A PIX_FWD -i wg1 -j REJECT
+}
+
+adguard_dns() {
+  [ -n "${ADGUARD_USER:-}" ] && [ -n "${ADGUARD_PASSWORD:-}" ] || { log "AdGuard credentials not set: DNS upstream unchanged"; return 0; }
+  local up fb
+  if [ "$1" = tor ]; then up="[\"$TOR_DNS\"]"; fb="[\"$TOR_DNS\"]"; else up=$WARP_UPSTREAMS; fb=$WARP_FALLBACK; fi
+  for _ in $(seq 1 30); do
+    if curl -sf -m 5 -u "$ADGUARD_USER:$ADGUARD_PASSWORD" -H 'Content-Type: application/json' \
+         -d "{\"upstream_dns\":$up,\"fallback_dns\":$fb}" "$ADGUARD_URL/control/dns_config" >/dev/null; then
+      curl -sf -m 5 -u "$ADGUARD_USER:$ADGUARD_PASSWORD" -X POST "$ADGUARD_URL/control/cache_clear" >/dev/null
+      return 0
+    fi
+    sleep 2
+  done
+  log "AdGuard API unreachable: DNS upstream unchanged"; return 1
+}
+
+tunnel_ready() {  # $1 = interface; brings it up if needed and checks it reaches the internet
+  [ -f "$WG/$1.conf" ] || return 1
+  ip link show "$1" >/dev/null 2>&1 || wg-quick up "$1" >/dev/null 2>&1
+  for _ in $(seq 1 15); do
+    curl -s -m 6 --interface "$1" https://1.1.1.1/cdn-cgi/trace | grep -q '^ip=' && return 0
+    sleep 2
+  done
+  return 1
+}
+
+tor_ready() {
+  for _ in $(seq 1 45); do
+    curl -s -m 8 --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip | grep -q '"IsTor":true' && return 0
+    sleep 2
+  done
+  return 1
+}
+
+apply() {
+  local mode=$1
+  firewall "$mode"   # first: the kill switch is never open while we wait for a tunnel
+  case "$mode" in
+    tor)      tor_ready || { log "Tor not ready - kill switch stays closed until it connects"; return 1; } ;;
+    provider) tunnel_ready wg2 || { log "$PROVIDER_NAME not reachable - kill switch stays closed until it connects"; return 1; } ;;
+  esac
+  adguard_dns "$mode"
+  echo "$mode" > /run/pgw/applied
+  log "exit mode: $mode"
+}
+
+case "${1:-status}" in
+  status)   saved_mode ;;
+  firewall) firewall "$(saved_mode)" ;;
+  apply)    apply "$(saved_mode)" ;;
+  set)
+    case "${2:-}" in
+      warp|tor) ;;
+      provider) [ -f "$WG/wg2.conf" ] || { echo "no provider configured: put its WireGuard config at /config/provider.conf and restart" >&2; exit 2; } ;;
+      *) echo "usage: pgw-exit set warp|provider|tor" >&2; exit 2 ;;
+    esac
+    echo "$2" > "$MODE_FILE"; sync "$MODE_FILE"
+    apply "$2" ;;
+  *) echo "usage: pgw-exit status | set warp|provider|tor | apply | firewall" >&2; exit 2 ;;
+esac

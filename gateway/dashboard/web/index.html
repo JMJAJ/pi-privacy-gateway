@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pi Privacy Gateway</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0d0d0d">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="referrer" content="no-referrer">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 512 512" aria-hidden="true"><path d="M256 84 400 140v104c0 92-60 160-144 188-84-28-144-96-144-188V140z" fill="none" stroke="currentColor" stroke-width="34" stroke-linejoin="round"/><circle cx="256" cy="250" r="52" class="logo-dot"/></svg>
+    <div>
+      <div class="brand-name">Pi Privacy Gateway</div>
+      <div class="brand-sub"><span id="host">—</span> · <span id="live" class="live off">connecting</span></div>
+    </div>
+  </div>
+  <div class="top-actions">
+    <div class="seg" role="radiogroup" aria-label="Exit mode">
+      <button class="seg-btn" id="mode-warp" role="radio" data-mode="warp">WARP</button>
+      <button class="seg-btn" id="mode-provider" role="radio" data-mode="provider" hidden>Provider</button>
+      <button class="seg-btn" id="mode-tor" role="radio" data-mode="tor">Tor</button>
+    </div>
+    <button class="icon-btn" id="theme-btn" title="Toggle light / dark" aria-label="Toggle theme">◐</button>
+  </div>
+</header>
+<nav class="tabs" aria-label="Sections">
+  <a href="#overview">Overview</a><a href="#traffic">Traffic</a><a href="#route">Route</a><a href="#dns">DNS</a><a href="#system">System &amp; power</a><a href="#security">Security</a>
+</nav>
+<div class="banner" id="banner" hidden></div>
+
+<main>
+  <!-- ============================== OVERVIEW -->
+  <section id="overview" class="section">
+    <div class="kpis" id="kpis"></div>
+    <div class="grid two overview-grid">
+      <div class="card">
+        <div class="card-head">
+          <h2>Connection stack</h2>
+          <span class="hint">Your traffic, layer by layer, from your device to the website. Live.</span>
+        </div>
+        <ol class="stack" id="stack"></ol>
+      </div>
+      <div class="col">
+      <div class="card">
+        <div class="card-head"><h2>Packet anatomy</h2><span class="hint">What one 1,280-byte packet looks like on each hop</span></div>
+        <div id="anatomy"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Exit points</h2><span class="hint">Who sees which IP</span></div>
+        <div id="exits"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Latency by layer</h2><span class="hint">Round-trip from the Pi, refreshed every 10 s</span></div>
+        <div id="latency"></div>
+      </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== TRAFFIC -->
+  <section id="traffic" class="section">
+    <h1 class="section-title">Traffic</h1>
+    <div class="card">
+      <div class="card-head"><h2>VPN devices · throughput</h2><span class="hint">All devices on the Pi VPN, last 5 minutes</span><div class="legend" id="lg-vpn"></div></div>
+      <div class="chart tall" id="ch-vpn"></div>
+    </div>
+    <div class="grid three" id="iface-charts"></div>
+    <div class="card">
+      <div class="card-head"><h2>Devices</h2><span class="hint">WireGuard peers on wg1</span></div>
+      <div class="table-wrap"><table class="tbl" id="tbl-peers"></table></div>
+    </div>
+  </section>
+
+  <!-- ============================== ROUTE -->
+  <section id="route" class="section">
+    <h1 class="section-title">Route</h1>
+    <div class="card">
+      <div class="card-head"><h2>Tor circuit</h2><span class="hint" id="tor-hint">Current general-purpose circuit</span></div>
+      <div id="tor-circuit"></div>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <h2>Live traceroute</h2>
+        <span class="hint">Probes are sent from the Pi. "Real ISP route" bypasses WARP to show the path your ISP sees.</span>
+      </div>
+      <form class="trace-form" id="trace-form" autocomplete="off">
+        <label class="field"><span>Target</span><input id="trace-target" value="1.1.1.1" spellcheck="false" maxlength="253" inputmode="url"></label>
+        <div class="seg small" role="radiogroup" aria-label="Path">
+          <button type="button" class="seg-btn on" data-path="warp">Through WARP</button>
+          <button type="button" class="seg-btn" data-path="isp">Real ISP route</button>
+        </div>
+        <label class="switch"><input type="checkbox" id="trace-live"><span>Live</span></label>
+        <button class="btn" id="trace-run" type="submit">Trace</button>
+      </form>
+      <div class="table-wrap"><table class="tbl" id="tbl-trace"><tbody><tr><td class="muted">Run a trace to see every hop.</td></tr></tbody></table></div>
+      <div class="foot muted" id="trace-meta"></div>
+    </div>
+  </section>
+
+  <!-- ============================== DNS -->
+  <section id="dns" class="section">
+    <h1 class="section-title">DNS &amp; blocking</h1>
+    <div class="kpis small" id="dns-kpis"></div>
+    <div class="grid two">
+      <div class="card">
+        <div class="card-head"><h2>Queries per hour</h2><span class="hint">Last 24 hours</span><div class="legend" id="lg-dns"></div></div>
+        <div class="chart" id="ch-dns"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Top blocked</h2><span class="hint">Trackers and ads stopped by AdGuard</span></div>
+        <div id="top-blocked"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Live query log</h2><span class="hint" id="qlog-hint">Every lookup your devices make</span>
+        <label class="switch right"><input type="checkbox" id="qlog-blocked-only"><span>Blocked only</span></label></div>
+      <div class="table-wrap tall-scroll"><table class="tbl" id="tbl-qlog"></table></div>
+    </div>
+  </section>
+
+  <!-- ============================== SYSTEM -->
+  <section id="system" class="section">
+    <h1 class="section-title">System &amp; power</h1>
+    <div class="grid two">
+      <div class="card" id="power-card">
+        <div class="card-head"><h2>Power draw</h2><span class="hint">Estimated: the Raspberry Pi 4 has no power sensor</span></div>
+        <div id="power"></div>
+        <div class="chart short" id="ch-power"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Health</h2><span class="hint">Voltage, throttling and clocks from the firmware</span></div>
+        <div id="health"></div>
+      </div>
+    </div>
+    <div class="grid two">
+      <div class="card">
+        <div class="card-head"><h2>CPU</h2><span class="hint" id="cpu-hint"></span></div>
+        <div id="cores"></div>
+        <div class="chart short" id="ch-cpu"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Temperature</h2><span class="hint">Raspberry Pi throttles at 80 °C</span></div>
+        <div class="chart" id="ch-temp"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Network interfaces</h2><span class="hint">Physical interfaces on the host</span></div>
+      <div class="table-wrap"><table class="tbl" id="tbl-radios"></table></div>
+    </div>
+  </section>
+
+  <!-- ============================== SECURITY -->
+  <section id="security" class="section">
+    <h1 class="section-title">Security</h1>
+    <div class="grid two">
+      <div class="card">
+        <div class="card-head"><h2>Checklist</h2><span class="hint">Live</span></div>
+        <ul class="checks" id="checks"></ul>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Components</h2><span class="hint">Everything the gateway needs, checked live</span></div>
+        <div class="svc-grid" id="services"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Listening ports</h2><span class="hint">Reachable from outside the Pi (firewall decides who actually gets in)</span></div>
+      <div class="table-wrap"><table class="tbl" id="tbl-ports"></table></div>
+    </div>
+  </section>
+</main>
+<footer class="foot-page">Pi Privacy Gateway · WireGuard · Cloudflare WARP · Tor · AdGuard Home · nothing on this page loads from the internet</footer>
+<div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>

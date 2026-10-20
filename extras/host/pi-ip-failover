@@ -1,0 +1,54 @@
+#!/bin/sh
+# pi-ip-failover (optional, runs on the HOST) - keep the gateway's LAN address alive when the
+# host has two Wi-Fi radios, e.g. a USB adapter (primary) + the Pi's onboard Wi-Fi (backup).
+# If the primary radio disappears (unplugged, USB reset, out of range), VIP is added to the
+# backup radio as a secondary address with its own source routing, and removed again when the
+# primary returns. Your VPN devices keep connecting to the same address.
+#
+# Install:  sudo install -m 750 pi-ip-failover /usr/local/sbin/ && sudo install -m 644 pi-ip-failover.service /etc/systemd/system/
+#           sudo systemctl enable --now pi-ip-failover
+# Requires: arping (iputils-arping). On the primary's NetworkManager profile also set
+#           ipv4.dad-timeout 0 (otherwise NM may see VIP on the backup radio as a conflict and give up).
+set -u
+VIP=192.168.1.10         # the address your devices use as WireGuard endpoint
+PRIMARY=wlan1            # e.g. a USB Wi-Fi adapter
+BACKUP=wlan0             # e.g. the onboard radio
+GW=192.168.1.1           # your router
+TABLE=201                # routing table used for traffic sourced from VIP
+RULE_PRIO=102
+METRIC=900
+GRACE=20                 # seconds the primary must be gone before failing over
+state="" down_since=""
+
+log() { logger -t pi-ip-failover "$*"; }
+primary_ok() { ip -4 -o addr show dev "$PRIMARY" 2>/dev/null | grep -q " $VIP/" && [ "$(cat /sys/class/net/$PRIMARY/operstate 2>/dev/null)" = up ]; }
+
+to_backup() {
+  ip addr add "$VIP/24" dev "$BACKUP" noprefixroute 2>/dev/null
+  ip route replace 192.168.1.0/24 dev "$BACKUP" src "$VIP" table $TABLE metric $METRIC
+  ip route replace default via $GW dev "$BACKUP" table $TABLE metric $METRIC
+  ip rule show | grep -q "^$RULE_PRIO:" || ip rule add priority $RULE_PRIO from $VIP lookup $TABLE
+  arping -q -U -c 3 -I "$BACKUP" "$VIP" >/dev/null 2>&1 &
+}
+to_primary() {
+  ip addr del "$VIP/24" dev "$BACKUP" 2>/dev/null
+  ip route del 192.168.1.0/24 dev "$BACKUP" table $TABLE metric $METRIC 2>/dev/null
+  ip route del default via $GW dev "$BACKUP" table $TABLE metric $METRIC 2>/dev/null
+  while ip rule del priority $RULE_PRIO 2>/dev/null; do :; done
+  arping -q -U -c 3 -I "$PRIMARY" "$VIP" >/dev/null 2>&1 &
+}
+
+# at boot give NetworkManager time to bring the primary up first
+[ "$(cut -d. -f1 /proc/uptime)" -lt 120 ] && sleep 60
+while true; do
+  if primary_ok; then
+    down_since=""
+    [ "$state" = primary ] || { to_primary; state=primary; log "$VIP on $PRIMARY"; }
+  else
+    now=$(cut -d. -f1 /proc/uptime); [ -n "$down_since" ] || down_since=$now
+    if [ "$state" != backup ] && [ $((now - down_since)) -lt $GRACE ]; then sleep 3; continue; fi
+    ip -4 -o addr show dev "$BACKUP" | grep -q " $VIP/" || to_backup
+    [ "$state" = backup ] || { state=backup; log "$PRIMARY down - $VIP moved to $BACKUP"; }
+  fi
+  sleep 3
+done

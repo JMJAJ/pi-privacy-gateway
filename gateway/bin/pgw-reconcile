@@ -1,0 +1,25 @@
+#!/bin/bash
+# Self-healing loop: keeps tunnels up, the kill switch armed and the chosen exit applied.
+# Cheap when everything is fine (a few `ip`/`iptables -C` calls every 5 s).
+. /usr/local/bin/pgw-lib
+
+while true; do
+  for i in wg0 wg2 wg1; do
+    [ -f "$WG/$i.conf" ] || continue
+    if ! ip link show "$i" >/dev/null 2>&1; then
+      wg-quick up "$i" >/dev/null 2>&1 && log "$i was down - restarted" || log "$i still down - retrying"
+    fi
+  done
+
+  mode=$(pgw-exit status)
+  if ! iptables -C FORWARD -j PIX_FWD 2>/dev/null; then
+    log "kill switch missing - re-arming"; pgw-exit firewall
+  fi
+  if [ "$mode" = provider ] && ! ip rule show | grep -q '^95:'; then
+    log "provider routing rule missing - restoring"; pgw-exit firewall
+  fi
+  if [ "$mode" != "$(cat /run/pgw/applied 2>/dev/null)" ]; then
+    pgw-exit apply || sleep 10
+  fi
+  sleep 5
+done
