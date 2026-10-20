@@ -58,7 +58,7 @@ x 'timeout 20 pgw device phone tor' >/dev/null 2>&1
 t "phone alone is sent into Tor"         "x 'iptables -t nat -S PIX_NAT | grep -q \"\\-s 10.13.13.2/32.*REDIRECT --to-ports 9040\"'"
 t "phone can't bypass Tor (fail closed)" "x 'iptables -S PIX_FWD | grep -q \"\\-s 10.13.13.2/32 -i wg1 -j REJECT\" && ! iptables -S PIX_FWD | grep -q \"\\-s 10.13.13.2/32 -i wg1 -o wg0\"'"
 t "others still use WARP"                "x 'iptables -S PIX_FWD | grep -q \"^-A PIX_FWD -i wg1 -o wg0 -j ACCEPT\"'"
-x 'pgw device laptop provider' >/dev/null 2>&1
+x 'timeout 20 pgw device laptop provider' >/dev/null 2>&1
 t "laptop routed to the provider"        "x 'ip rule | grep -q \"^94:.*from 10.13.13.3 iif wg1 lookup 2020\"'"
 t "failover moves it to WARP (provider down)" "waitfor \"x 'test -f /run/pgw/failover && iptables -S PIX_FWD | grep -q \\\"\\-s 10.13.13.3/32 -i wg1 -o wg0 -j ACCEPT\\\"'\" 40"
 x 'pgw device phone default; pgw device laptop default' >/dev/null 2>&1
@@ -72,7 +72,7 @@ x 'pgw-exit set warp' >/dev/null 2>&1
 t "back to warp"                         "x 'iptables -S PIX_FWD | grep -q \"^-A PIX_FWD -i wg1 -o wg0 -j ACCEPT\"'"
 echo "dashboard"
 t "serves the page"                      "x 'curl -sf http://127.0.0.1:8080/dashboard | grep -q \"Pi Privacy Gateway\"'"
-t "strict CSP header"                    "x 'curl -sI http://127.0.0.1:8080/dashboard | grep -i content-security-policy | grep -q \"frame-ancestors .none.\"'"
+t "strict CSP header"                    "x 'curl -s -D - -o /dev/null http://127.0.0.1:8080/dashboard | grep -i content-security-policy | grep -q \"frame-ancestors .none.\"'"
 t "mode API answers"                     "x 'curl -sf http://127.0.0.1:8080/api/mode | grep -q \"\\\"mode\\\": \\\"warp\\\"\"'"
 t "mode switch needs the CSRF header"    "x 'curl -s -X POST -d mode=tor http://127.0.0.1:8080/api/mode | grep -q \"bad request\"'"
 t "add device from the dashboard (QR)"   "api /api/devices/add '{\"name\":\"tablet\"}' | grep -q 'data:image/png;base64'"

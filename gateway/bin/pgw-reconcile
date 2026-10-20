@@ -34,7 +34,8 @@ while true; do
     log "kill switch missing - re-arming"; pgw-exit firewall
   fi
   if [ "$(pgw-exit wanted)" != "$(cat /run/pgw/applied 2>/dev/null)" ]; then
-    pgw-exit apply || sleep 10
+    # rules are fail-closed either way, so don't wait for slow exits here (that would stall failover)
+    pgw-exit apply --nowait || sleep 10
   fi
   sleep 5
 done
