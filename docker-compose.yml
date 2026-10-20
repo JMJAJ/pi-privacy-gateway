@@ -13,19 +13,24 @@ services:
       - ./data/adguard/conf:/opt/adguardhome/conf
 
   # VPN server + exit selection (WARP / provider / Tor) + kill switch + dashboard.
-  # Needs host networking and privileges: it creates WireGuard interfaces, routing rules
+  # Needs host networking: it creates WireGuard interfaces, routing rules
   # and firewall rules in the host's network stack. Keys live only in ./data/gateway.
   gateway:
     build: ./gateway
     image: pi-privacy-gateway:local
     container_name: pgw-gateway
     network_mode: host
-    privileged: true
+    # not privileged: only the two capabilities a router needs. Kernel settings (IP forwarding,
+    # WireGuard module) are done once on the host by scripts/setup.sh.
+    cap_add:
+      - NET_ADMIN   # interfaces, routes, firewall rules
+      - NET_RAW     # ping / traceroute in the dashboard
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     env_file: .env
     volumes:
       - ./data/gateway:/config
       - ./data/wireguard:/etc/wireguard
-      - /lib/modules:/lib/modules:ro
     depends_on:
       - adguard

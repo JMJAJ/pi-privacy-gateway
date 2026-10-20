@@ -14,6 +14,7 @@ import json
 import os
 import re
 import socket
+import sqlite3
 import subprocess
 import threading
 import time
@@ -36,6 +37,8 @@ PORT = int(os.environ.get("DASHBOARD_PORT", "80"))
 WARP_FWMARK = 51820
 HISTORY_LEN = 300
 IDLE_AFTER = 90
+# electricity cost shown next to the power estimate (each viewer can override it in the page)
+PRICE_DEFAULTS = {"per_kwh": float(os.environ.get("PRICE_PER_KWH", "0.30")), "currency": os.environ.get("CURRENCY", "€")}
 
 _lock = threading.Lock()
 _state = {}
@@ -625,11 +628,122 @@ def set_mode(mode):
     return out
 
 
+# ------------------------------------------------------------------ devices
+# Managing devices hands out VPN keys, so it needs a VPN client - and, if ADMIN_IPS is set,
+# one of those specific devices (e.g. ADMIN_IPS=10.13.13.2 for your PC only).
+ADMIN_IPS = {x.strip() for x in os.environ.get("ADMIN_IPS", "").split(",") if x.strip()}
+NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+
+
+def device_modes():
+    out = {}
+    for line in read(f"{CFG}/device-modes").splitlines():
+        f = line.split()
+        if len(f) == 2:
+            out[f[0]] = f[1]
+    return out
+
+
+def devices():
+    names = peers_by_ip()
+    modes = device_modes()
+    live = {p["allowed"]: p for p in wg_dump("wg1", names)["peers"]}
+    rows = []
+    for allowed, name in names.items():
+        ip, p = allowed.split("/")[0], live.get(allowed, {})
+        rows.append({"name": name, "ip": ip, "exit": modes.get(ip, "default"), "handshake_age": p.get("handshake_age"),
+                     "endpoint": p.get("endpoint"), "rx": p.get("rx"), "tx": p.get("tx")})
+    return sorted(rows, key=lambda r: ipaddress.ip_address(r["ip"]))
+
+
+def peer_bundle(name):
+    """The device's config + QR code. Contains its private key: only ever sent to an admin over the VPN."""
+    conf_path, png_path = f"{CFG}/peers/{name}.conf", f"{CFG}/peers/{name}.png"
+    if not os.path.exists(conf_path):
+        return None
+    with open(png_path, "rb") as fh:
+        qr = "data:image/png;base64," + base64.b64encode(fh.read()).decode()
+    return {"name": name, "conf": read(conf_path), "qr": qr}
+
+
+def pgw(*args, timeout=150):
+    p = subprocess.run(["/usr/local/bin/pgw", *args], capture_output=True, text=True, timeout=timeout)
+    return p.returncode, (p.stdout + p.stderr).strip()
+
+
+# ------------------------------------------------------------------ history (30 days, 1 point per minute)
+HIST_DB = f"{CFG}/history.db"
+RANGES = {"1h": (3600, 60), "24h": (86400, 600), "7d": (604800, 3600), "30d": (2592000, 14400)}  # span, bucket
+
+
+def _db():
+    conn = sqlite3.connect(HIST_DB, timeout=5)
+    conn.execute("CREATE TABLE IF NOT EXISTS h (t INTEGER PRIMARY KEY, cpu REAL, temp REAL, power REAL, "
+                 "down REAL, up REAL, blocked_pct REAL, devices INTEGER, mode TEXT)")
+    return conn
+
+
+def history_sample():
+    """Average the last minute of live samples into one row; keep 30 days (~43k rows, a few MB)."""
+    with _lock:
+        t = list(_history["t"])
+        cols = {k: list(_history.get(k, [])) for k in ("cpu", "temp", "power", "vpn_down", "vpn_up")}
+    now = int(time.time())
+    idx = [i for i, ts in enumerate(t) if ts > now - 60]
+    if not idx:
+        return
+
+    def avg(k):
+        vals = [cols[k][i] for i in idx if i < len(cols[k]) and cols[k][i] is not None]
+        return round(sum(vals) / len(vals), 2) if vals else None
+    online = sum(1 for p in (get("wg1") or {}).get("peers", []) if (p.get("handshake_age") or 9999) < 180)
+    with _db() as conn:
+        conn.execute("INSERT OR REPLACE INTO h VALUES (?,?,?,?,?,?,?,?,?)",
+                     (now - now % 60, avg("cpu"), avg("temp"), avg("power"), avg("vpn_down"), avg("vpn_up"),
+                      (get("dns") or {}).get("blocked_pct"), online, quick_mode()))
+        conn.execute("DELETE FROM h WHERE t < ?", (now - RANGES["30d"][0],))
+
+
+def history_query(rng):
+    span, bucket = RANGES[rng]
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT (t / ?) * ? AS b, AVG(cpu), AVG(temp), AVG(power), AVG(down), MAX(down), AVG(up), "
+            "AVG(blocked_pct), MAX(devices) FROM h WHERE t >= ? GROUP BY b ORDER BY b",
+            (bucket, bucket, int(time.time()) - span)).fetchall()
+    keys = ("t", "cpu", "temp", "power", "down", "down_peak", "up", "blocked_pct", "devices")
+    return {"range": rng, "span": span, "bucket": bucket, **{k: [r[i] for r in rows] for i, k in enumerate(keys)}}
+
+
+# ------------------------------------------------------------------ leak test
+def dns_seen(token, client_ip):
+    """Did a lookup containing `token` from this device reach AdGuard? If not, the device's DNS
+    goes somewhere else (browser DNS-over-HTTPS, Android Private DNS...) = a DNS leak."""
+    try:
+        data = adguard(f"/control/querylog?limit=200&search={token}").get("data", [])
+    except Exception:  # noqa: BLE001
+        return None
+    return any(token in ((q.get("question") or {}).get("name") or "") and q.get("client") == client_ip for q in data)
+
+
+def expected_exit(client_ip):
+    """Which exit this device should be using right now, and that exit's public IP."""
+    mode = device_modes().get(client_ip) or quick_mode()
+    if mode == "provider" and os.path.exists("/run/pgw/failover"):
+        mode = "warp"
+    ex = get("exits") or {}
+    ip = {"warp": (ex.get("warp") or {}).get("ip"), "provider": (ex.get("provider") or {}).get("ip"),
+          "tor": ex.get("tor_ip")}.get(mode)
+    return {"mode": mode, "ip": ip}
+
+
 # ----------------------------------------------------------------- snapshot
 def snapshot(trusted):
     with _lock:
         s = json.loads(json.dumps(_state, default=str))
-    s.update(trusted=trusted, server_time=time.time(), vpn_ip=VPN_IP, vpn_subnet=str(VPN_NET), provider_name=PROVIDER_NAME)
+    s.update(trusted=trusted, server_time=time.time(), vpn_ip=VPN_IP, vpn_subnet=str(VPN_NET), provider_name=PROVIDER_NAME,
+             device_modes=device_modes(), failover=os.path.exists("/run/pgw/failover"),
+             price=PRICE_DEFAULTS)
     if not trusted:  # LAN viewers: no real IP, no device endpoints
         if s.get("exits", {}).get("isp"):
             s["exits"]["isp"] = {"redacted": True}
@@ -670,8 +784,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         for k, v in (("Content-Type", ctype), ("Cache-Control", "no-store"), ("Content-Length", str(len(body))),
                      ("X-Content-Type-Options", "nosniff"), ("Referrer-Policy", "no-referrer"),
+                     # connect-src: the leak test fetches Cloudflare's IPv4/IPv6 trace and a random
+                     # *.example.com name (to see which resolver the device really uses)
                      ("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; "
-                                                 "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")):
+                                                 "img-src 'self' data:; frame-ancestors 'none'; connect-src 'self' "
+                                                 "https://1.1.1.1 https://[2606:4700:4700::1111] https://*.example.com")):
             self.send_header(k, v)
         self.end_headers()
         try:
@@ -679,8 +796,14 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001
             pass
 
-    def guarded_post(self):
+    def can_manage(self):
+        return self.trusted() and (not ADMIN_IPS or self.client_address[0] in ADMIN_IPS)
+
+    def guarded_post(self, manage=False):
         """VPN clients only; the custom header + JSON body force a CORS preflight we never answer."""
+        if manage and self.trusted() and not self.can_manage():
+            self.send(403, {"error": "only the admin devices in ADMIN_IPS can manage devices"})
+            return None
         if not self.trusted():
             self.send(403, {"error": "connect through the VPN to do this"})
             return None
@@ -723,8 +846,23 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/stream":
             self.stream()
         elif path == "/api/history":
-            with _lock:
-                self.send(200, {k: list(v) for k, v in _history.items()})
+            rng = (parse_qs(u.query).get("range") or [""])[0]
+            if rng in RANGES:
+                self.send(200, history_query(rng))
+            else:
+                with _lock:
+                    self.send(200, {k: list(v) for k, v in _history.items()})
+        elif path == "/api/devices":
+            if not self.trusted():
+                self.send(403, {"error": "connect through the VPN to see devices"})
+            else:
+                self.send(200, {"devices": devices(), "can_manage": self.can_manage(), "default": quick_mode(),
+                                "provider": PROVIDER_NAME if os.path.exists(f"{WG_DIR}/wg2.conf") else None})
+        elif path == "/api/leak/expect":
+            if not self.trusted():
+                self.send(403, {"error": "open the dashboard through the VPN to run the leak test"})
+            else:
+                self.send(200, {"client": self.client_address[0], **expected_exit(self.client_address[0])})
         elif path == "/api/status":
             self.send(200, snapshot(self.trusted()))
         elif path == "/api/mode":  # cheap, for tray apps
@@ -764,6 +902,40 @@ class Handler(BaseHTTPRequestHandler):
             out = set_mode(mode)
             ok = f"exit mode: {mode}" in out
             self.send(200 if ok else 500, {"ok": ok, "mode": mode, "log": out})
+        elif path in ("/api/devices/add", "/api/devices/remove", "/api/devices/exit", "/api/devices/qr"):
+            body = self.guarded_post(manage=True)
+            if body is None:
+                return
+            name = str(body.get("name") or "")
+            if not NAME_RE.match(name):
+                self.send(400, {"error": "name must be 1-32 letters, digits, - or _"})
+                return
+            if path.endswith("/add"):
+                rc, out = pgw("add-peer", name, "--quiet")
+                self.send(200 if rc == 0 else 400, {"ok": True, **peer_bundle(name)} if rc == 0 else {"error": out})
+            elif path.endswith("/remove"):
+                rc, out = pgw("remove-peer", name)
+                self.send(200 if rc == 0 else 400, {"ok": rc == 0, "log": out})
+            elif path.endswith("/exit"):
+                mode = body.get("mode")
+                if mode not in ("warp", "provider", "tor", "default"):
+                    self.send(400, {"error": "mode must be warp, provider, tor or default"})
+                    return
+                with _mode_lock:
+                    rc, out = pgw("device", name, mode)
+                self.send(200 if rc == 0 else 400, {"ok": rc == 0, "log": out})
+            else:
+                b = peer_bundle(name)
+                self.send(200 if b else 404, b or {"error": "no config stored for that device"})
+        elif path == "/api/leak/dns":
+            body = self.guarded_post()
+            if body is None:
+                return
+            token = str(body.get("token") or "")
+            if not re.fullmatch(r"[a-z0-9]{12,40}", token):
+                self.send(400, {"error": "bad token"})
+                return
+            self.send(200, {"seen": dns_seen(token, self.client_address[0])})
         else:
             self.send(404, {"error": "not found"})
 
@@ -775,6 +947,7 @@ if __name__ == "__main__":
     loop(5, components, 60)
     loop(10, latency, 600)
     loop(30, slow, 300)
+    loop(60, history_sample)       # one row per minute, kept 30 days
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     srv.daemon_threads = True
     srv.serve_forever()

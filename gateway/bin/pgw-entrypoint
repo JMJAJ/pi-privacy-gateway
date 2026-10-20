@@ -4,10 +4,14 @@
 set -uo pipefail
 . /usr/local/bin/pgw-lib
 
-sysctl -qw net.ipv4.ip_forward=1 net.ipv4.conf.all.src_valid_mark=1 || log "WARNING: could not set sysctls (is the container privileged?)"
-modprobe wireguard 2>/dev/null || true
+# The container is NOT privileged (only NET_ADMIN + NET_RAW). Kernel settings and the WireGuard
+# module are prepared once on the host by scripts/setup.sh; here we only check them.
+sysctl -qw net.ipv4.ip_forward=1 net.ipv4.conf.all.src_valid_mark=1 2>/dev/null || true
+for k in net.ipv4.ip_forward net.ipv4.conf.all.src_valid_mark; do
+  [ "$(sysctl -n "$k" 2>/dev/null)" = 1 ] || { log "ERROR: $k is not 1 on the host - run scripts/setup.sh"; exit 1; }
+done
 ip link add pgw-probe type wireguard 2>/dev/null && ip link del pgw-probe || {
-  log "ERROR: this kernel has no WireGuard support (needs Linux 5.6+)"; exit 1; }
+  log "ERROR: no WireGuard in the host kernel (needs Linux 5.6+; scripts/setup.sh loads the module)"; exit 1; }
 
 mkdir -p "$WG" "$CFG/peers" "$CFG/warp" "$CFG/tor/data" /run/pgw /run/tor
 chmod 700 "$WG" "$CFG/peers" "$CFG/warp"

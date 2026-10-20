@@ -20,6 +20,17 @@ if modprobe wireguard 2>/dev/null || ip link add pgw-test type wireguard 2>/dev/
 else
   die "this kernel has no WireGuard support (needs Linux 5.6+)"
 fi
+# the gateway container is unprivileged, so the host loads the module and sets forwarding once
+echo wireguard > /etc/modules-load.d/pi-privacy-gateway.conf
+printf 'net.ipv4.ip_forward = 1\nnet.ipv4.conf.all.src_valid_mark = 1\n' > /etc/sysctl.d/99-pi-privacy-gateway.conf
+sysctl -q --system && ok "IP forwarding on, WireGuard module loads at boot"
+
+# hardware watchdog: a frozen host resets itself within ~10 s (Raspberry Pi and most boards)
+if [ -e /dev/watchdog ] && [ ! -f /etc/systemd/system.conf.d/watchdog.conf ]; then
+  mkdir -p /etc/systemd/system.conf.d
+  printf '[Manager]\nRuntimeWatchdogSec=10\nRebootWatchdogSec=2min\n' > /etc/systemd/system.conf.d/watchdog.conf
+  systemctl daemon-reexec && ok "hardware watchdog enabled"
+fi
 
 # 2. Docker + compose
 if ! command -v docker >/dev/null; then
