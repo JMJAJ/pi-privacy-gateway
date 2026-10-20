@@ -610,12 +610,16 @@ _quick = {}
 
 
 def quick_mode():
+    try:   # cached until the file changes (also when the CLI switches the mode)
+        stamp = os.stat(f"{CFG}/mode").st_mtime_ns
+    except OSError:
+        stamp = None
     hit = _quick.get("mode")
-    if hit and time.time() - hit[0] < 2:
+    if hit and stamp is not None and hit[0] == stamp:
         return hit[1]
     m = read(f"{CFG}/mode", "warp")
     m = m if m in ("warp", "provider", "tor") else "warp"
-    _quick["mode"] = (time.time(), m)
+    _quick["mode"] = (stamp, m)
     return m
 
 
