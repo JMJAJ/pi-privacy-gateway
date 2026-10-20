@@ -11,6 +11,7 @@ IMG=pgw-smoke:test
 C=pgw-smoke
 pass=0 fail=0
 t() { if eval "$2" >/dev/null 2>&1; then echo "  ok    $1"; pass=$((pass+1)); else echo "  FAIL  $1"; fail=$((fail+1)); fi; }
+dump() { echo "--- debug"; x 'cat /config/mode; ls -l /config; curl -s -m 5 http://127.0.0.1:8080/api/mode; echo; ip rule; iptables -S PIX_FWD' 2>&1; docker logs --tail 40 "$C" 2>&1; }
 x() { docker exec "$C" sh -c "$1"; }
 api() { x "curl -s -H 'Content-Type: application/json' -H 'X-Pi-Control: 1' -d '$2' http://127.0.0.1:8080$1"; }
 waitfor() { for _ in $(seq 1 "$2"); do eval "$1" >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
@@ -59,7 +60,8 @@ t "phone alone is sent into Tor"         "x 'iptables -t nat -S PIX_NAT | grep -
 t "phone can't bypass Tor (fail closed)" "x 'iptables -S PIX_FWD | grep -q \"\\-s 10.13.13.2/32 -i wg1 -j REJECT\" && ! iptables -S PIX_FWD | grep -q \"\\-s 10.13.13.2/32 -i wg1 -o wg0\"'"
 t "others still use WARP"                "x 'iptables -S PIX_FWD | grep -q \"^-A PIX_FWD -i wg1 -o wg0 -j ACCEPT\"'"
 x 'timeout 20 pgw device laptop provider' >/dev/null 2>&1
-t "laptop routed to the provider"        "x 'ip rule | grep -q \"^94:.*from 10.13.13.3 iif wg1 lookup 2020\"'"
+# (provider is offline here, so failover may already have moved it to WARP: either table is right)
+t "laptop gets its own routing rule"     "x 'grep -q \"10.13.13.3 provider\" /config/device-modes && ip rule | grep -q \"^94:.*from 10.13.13.3 iif wg1\"'"
 t "failover moves it to WARP (provider down)" "waitfor \"x 'test -f /run/pgw/failover && iptables -S PIX_FWD | grep -q \\\"\\-s 10.13.13.3/32 -i wg1 -o wg0 -j ACCEPT\\\"'\" 40"
 x 'pgw device phone default; pgw device laptop default' >/dev/null 2>&1
 t "overrides cleared"                    "x '! test -s /config/device-modes'"
@@ -86,6 +88,7 @@ t "leak-test API validates input"        "api /api/leak/dns '{\"token\":\"x;y\"}
 t "traceroute rejects shell tricks"      "x 'curl -s \"http://127.0.0.1:8080/api/trace?target=1.1.1.1;id\" | grep -q invalid'"
 t "live stream sends data"               "x 'timeout 4 curl -sN http://127.0.0.1:8080/api/stream | grep -q ^data:'"
 
+[ "$fail" -eq 0 ] || dump
 docker rm -f "$C" >/dev/null
 rm -rf "$CFGDIR"
 echo; echo "$pass passed, $fail failed"
