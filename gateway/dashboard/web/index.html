@@ -70,9 +70,19 @@
       <div class="card-head"><h2>VPN devices · throughput</h2><span class="hint">All devices on the Pi VPN, last 5 minutes</span><div class="legend" id="lg-vpn"></div></div>
       <div class="chart tall" id="ch-vpn"></div>
     </div>
+    <div class="card">
+      <div class="card-head"><h2>History</h2><span class="hint" id="hist-meta">One point per minute, kept 30 days</span>
+        <div class="seg small right" role="radiogroup" aria-label="History range"><button class="seg-btn" data-range="1h">1 h</button><button class="seg-btn on" data-range="24h">24 h</button><button class="seg-btn" data-range="7d">7 days</button><button class="seg-btn" data-range="30d">30 days</button></div></div>
+      <div class="grid three hist">
+        <div><div class="mini-head"><b>Throughput (average)</b><span class="legend" id="lg-hist"></span></div><div class="chart" id="ch-hist-net"></div></div>
+        <div><div class="mini-head"><b>CPU</b></div><div class="chart" id="ch-hist-cpu"></div></div>
+        <div><div class="mini-head"><b>Temperature</b></div><div class="chart" id="ch-hist-temp"></div></div>
+      </div>
+    </div>
     <div class="grid three" id="iface-charts"></div>
     <div class="card">
-      <div class="card-head"><h2>Devices</h2><span class="hint">WireGuard peers on wg1</span></div>
+      <div class="card-head"><h2>Devices</h2><span class="hint">Each device can have its own exit</span>
+        <form class="dev-add right" id="dev-add" hidden autocomplete="off"><input id="dev-name" placeholder="new device name" maxlength="32" spellcheck="false" aria-label="New device name"><button class="btn" id="dev-add-btn" type="submit">Add device</button></form></div>
       <div class="table-wrap"><table class="tbl" id="tbl-peers"></table></div>
     </div>
   </section>
@@ -80,6 +90,10 @@
   <!-- ============================== ROUTE -->
   <section id="route" class="section">
     <h1 class="section-title">Route</h1>
+    <div class="card">
+      <div class="card-head"><h2>Leak test</h2><span class="hint">Checks THIS device: exit IP, IPv6, DNS resolver, WebRTC</span><button class="btn right" id="leak-run" type="button">Run leak test</button></div>
+      <div id="leak-results"><p class="muted">Takes about 10 seconds. Run it on each device (phone, laptop) through the VPN.</p></div>
+    </div>
     <div class="card">
       <div class="card-head"><h2>Tor circuit</h2><span class="hint" id="tor-hint">Current general-purpose circuit</span></div>
       <div id="tor-circuit"></div>
@@ -131,6 +145,7 @@
       <div class="card" id="power-card">
         <div class="card-head"><h2>Power draw</h2><span class="hint">Estimated: the Raspberry Pi 4 has no power sensor</span></div>
         <div id="power"></div>
+        <label class="price-row">Electricity price <input id="kwh-price" type="number" inputmode="decimal" min="0" step="0.01" aria-label="Price per kWh"> per kWh in <input id="kwh-cur" class="cur" maxlength="4" aria-label="Currency"> <span class="hint">saved in this browser</span></label>
         <div class="chart short" id="ch-power"></div>
       </div>
       <div class="card">
@@ -176,6 +191,14 @@
 </main>
 <footer class="foot-page">Pi Privacy Gateway · WireGuard · Cloudflare WARP · Tor · AdGuard Home · nothing on this page loads from the internet</footer>
 <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+<div class="toast" id="toast" role="status" hidden></div>
+<div class="modal" id="modal" hidden><div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <h2 id="modal-title">Device</h2>
+  <p class="hint">Scan with the WireGuard app (+ &rarr; Scan from QR code), or download the file for a computer.</p>
+  <img id="modal-qr" alt="WireGuard configuration QR code" width="320" height="320">
+  <p class="warn-text">This contains the device’s private key. Don’t screenshot or share it.</p>
+  <div class="modal-actions"><a class="btn ghost" id="modal-dl" href="#">Download .conf</a><button class="btn" id="modal-close" type="button">Done</button></div>
+</div></div>
 <script src="/app.js"></script>
 </body>
 </html>

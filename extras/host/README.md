@@ -52,3 +52,10 @@ sudo systemctl restart chrony
 [`pi-ip-failover`](pi-ip-failover) moves the gateway's LAN address to a second radio if the first
 one disappears, and back when it returns. Edit the variables at the top, then follow the install
 lines in the file.
+
+## Hardware watchdog (done by setup.sh)
+
+`scripts/setup.sh` enables the board's hardware watchdog through systemd
+(`/etc/systemd/system.conf.d/watchdog.conf`: `RuntimeWatchdogSec=10`, `RebootWatchdogSec=2min`). If the host ever
+freezes completely, it resets itself within about 10 seconds and the gateway comes back on its own, instead of
+waiting for someone to pull the plug. Remove that file and run `systemctl daemon-reexec` to turn it off.

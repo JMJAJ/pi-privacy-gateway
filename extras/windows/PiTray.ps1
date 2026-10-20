@@ -55,6 +55,7 @@ $miDash   = $menu.Items.Add('Open dashboard')
 $miQuit   = $menu.Items.Add('Quit tray')
 $tray.ContextMenuStrip = $menu
 
+$script:pendingOn = $null   # set when VPN ON is requested; the timer retries one failed start
 $script:state = @{ on = $false; mode = $null; reachable = $false; kill = $false; busy = $false }
 $script:last = ''
 
@@ -133,7 +134,7 @@ function Open-Dashboard {
     else { Start-Process $url }
 }
 
-$miOn.add_Click({ Invoke-VpnTask 'PGW VPN On';  $miStatus.Text = 'Turning VPN on...' })
+$miOn.add_Click({ Invoke-VpnTask 'PGW VPN On';  $miStatus.Text = 'Turning VPN on...'; $script:pendingOn = @{ at = Get-Date; retried = $false } })
 $miOff.add_Click({ Invoke-VpnTask 'PGW VPN Off'; $miStatus.Text = 'Turning VPN off...' })
 $miWarp.add_Click({ Set-ExitMode 'warp' })
 $miTor.add_Click({ Set-ExitMode 'tor' })
@@ -152,6 +153,21 @@ $tray.add_MouseClick({
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 3000
 $timer.add_Tick({
+    if ($script:pendingOn) {
+        $st = (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue).Status
+        $age = ((Get-Date) - $script:pendingOn.at).TotalSeconds
+        if ($st -eq 'Running') { $script:pendingOn = $null }
+        elseif ($st -eq 'Stopped' -and $age -gt 12 -and -not $script:pendingOn.retried) {
+            # WireGuard's first start after a network change sometimes fails (error 7023); a retry works
+            $script:pendingOn.retried = $true
+            Invoke-VpnTask 'PGW VPN On'
+            $tray.ShowBalloonTip(2500, 'Pi Privacy', 'First start failed - retrying automatically...', 'Info')
+        }
+        elseif ($age -gt 90) {
+            $script:pendingOn = $null
+            $tray.ShowBalloonTip(5000, 'Pi Privacy', 'VPN could not start. Internet works normally; try VPN ON again.', 'Warning')
+        }
+    }
     if ($script:job -and $script:job.handle.IsCompleted) {
         $res = ($script:job.ps.EndInvoke($script:job.handle) | Select-Object -First 1)
         $script:job.ps.Dispose()

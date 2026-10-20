@@ -24,7 +24,9 @@ jobs:
     needs: lint
     steps:
       - uses: actions/checkout@v4
-      - name: smoke test (isolated network namespace, offline WARP stand-in)
+      - name: load WireGuard on the host (the container is unprivileged, like in production)
+        run: sudo modprobe wireguard
+      - name: smoke test (unprivileged, isolated network namespace, offline WARP stand-in)
         run: sudo bash tests/smoke.sh
 
   arm64-build:

@@ -1,7 +1,14 @@
 #!/bin/bash
-# Self-healing loop: keeps tunnels up, the kill switch armed and the chosen exit applied.
+# Self-healing loop: keeps tunnels up, the kill switch armed and the chosen exits applied.
 # Cheap when everything is fine (a few `ip`/`iptables -C` calls every 5 s).
+# With EXIT_FAILOVER=warp it also moves provider devices to WARP while the provider is down.
 . /usr/local/bin/pgw-lib
+bad=0 good=0
+
+provider_healthy() {   # recent handshake on the provider tunnel (keepalive renews it every ~2 min)
+  local t; t=$(wg show wg2 latest-handshakes 2>/dev/null | awk '{print $2}' | sort -n | tail -1)
+  [ -n "$t" ] && [ "$t" -gt 0 ] && [ $(( $(date +%s) - t )) -lt 180 ]
+}
 
 while true; do
   for i in wg0 wg2 wg1; do
@@ -11,14 +18,22 @@ while true; do
     fi
   done
 
-  mode=$(pgw-exit status)
+  # failover (opt-in): two bad checks -> WARP; 30 s of good checks -> back to the provider
+  if [ "${EXIT_FAILOVER:-off}" = warp ] && [ -f "$WG/wg2.conf" ] && pgw-exit configured provider; then
+    if provider_healthy; then bad=0; good=$((good + 1)); else good=0; bad=$((bad + 1)); fi
+    if [ ! -f /run/pgw/failover ] && [ "$bad" -ge 2 ]; then
+      echo on > /run/pgw/failover; log "$PROVIDER_NAME down - FAILOVER: its devices now use WARP"
+    elif [ -f /run/pgw/failover ] && [ "$good" -ge 6 ]; then
+      rm -f /run/pgw/failover; log "$PROVIDER_NAME back - failover ended"
+    fi
+  else
+    rm -f /run/pgw/failover
+  fi
+
   if ! iptables -C FORWARD -j PIX_FWD 2>/dev/null; then
     log "kill switch missing - re-arming"; pgw-exit firewall
   fi
-  if [ "$mode" = provider ] && ! ip rule show | grep -q '^95:'; then
-    log "provider routing rule missing - restoring"; pgw-exit firewall
-  fi
-  if [ "$mode" != "$(cat /run/pgw/applied 2>/dev/null)" ]; then
+  if [ "$(pgw-exit wanted)" != "$(cat /run/pgw/applied 2>/dev/null)" ]; then
     pgw-exit apply || sleep 10
   fi
   sleep 5

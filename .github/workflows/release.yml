@@ -1,0 +1,56 @@
+name: Release
+
+# On a version tag (v1.2.3): build the gateway image for Raspberry Pi (arm64) and x86-64, push it to
+# GitHub Container Registry, and sign it with Sigstore (keyless - no secrets to leak) together with
+# an SBOM and build provenance. Verify before you run it:
+#   cosign verify ghcr.io/<owner>/pi-privacy-gateway:<tag> \
+#     --certificate-identity-regexp 'https://github.com/<owner>/pi-privacy-gateway/' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write   # keyless signing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: sigstore/cosign-installer@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: gateway
+          platforms: linux/arm64,linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+      - name: sign
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          for tag in $TAGS; do cosign sign --yes "${tag}@${DIGEST}"; done

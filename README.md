@@ -31,15 +31,28 @@ flowchart LR
 
 ## Features
 
-- **WireGuard VPN server** for your devices, with QR codes for phones (`pgw add-peer phone`)
+- **WireGuard VPN server** for your devices, with preshared keys (post-quantum hardening) and QR codes —
+  add, revoke and scan devices right from the dashboard, or with `pgw add-peer phone`
 - **Three exit modes**, switchable for all devices at once from the dashboard, a CLI or the Windows tray app
+- **Per-device exits**: e.g. the TV on fast WARP, your phone through the provider, one laptop always in Tor
 - **Kill switch** that fails closed, armed before the VPN interface even comes up
+- **Optional provider failover**: if the provider is down, its devices fall back to WARP instead of losing internet,
+  and move back automatically when it recovers (`EXIT_FAILOVER=warp`, off by default)
+- **Push alerts** to your phone via [ntfy](https://ntfy.sh) when an exit, Tor, DNS or the kill switch breaks, the
+  CPU overheats, the power supply sags, the disk fills or the clock drifts — and when it recovers
+- **30-day history** of throughput, CPU, temperature and power, stored locally in SQLite
+- **Built-in leak test**: checks from your own browser that your exit IP, DNS resolver, IPv6 and WebRTC all
+  go where the gateway says they should
 - **AdGuard Home** DNS filtering with DNSSEC and encrypted (DoH) upstreams; in Tor mode DNS resolves through Tor too
 - **Live dashboard**: your traffic layer by layer, live throughput per device and interface, Tor circuit with relay
   countries, live traceroute (through WARP *or* along your real ISP path), DNS query log, latency per layer, system
-  health, and an estimated power draw on a Raspberry Pi 4. No external requests: nothing on the page loads from the internet.
-- **Private by default**: your real IP, the DNS log, traceroute and mode switching are only available to devices on the VPN,
-  not to everyone on your Wi-Fi. Mode switching is CSRF-protected.
+  health, and an estimated power draw and electricity cost on a Raspberry Pi 4. Nothing on the page loads from the
+  internet (the leak test only contacts 1.1.1.1 when you press it).
+- **Private by default**: your real IP, the DNS log, traceroute and all controls are only available to devices on the VPN,
+  not to everyone on your Wi-Fi; device management can be limited further to your own computer (`ADMIN_IPS`).
+  Every control is CSRF-protected.
+- **Unprivileged container**: only the `NET_ADMIN` and `NET_RAW` capabilities, `no-new-privileges`; release images are
+  multi-arch, signed with Sigstore and ship an SBOM and build provenance.
 - **Self-healing**: tunnels, routing rules and the kill switch are re-checked every 5 seconds; quiet when nobody watches.
 
 ## Requirements
@@ -77,11 +90,42 @@ docker compose exec gateway pgw add-peer laptop     # new device (prints a QR co
 docker compose exec gateway pgw qr laptop           # show its QR code again
 docker compose exec gateway pgw list                # devices and when they last connected
 docker compose exec gateway pgw remove-peer laptop  # revoke a device
-docker compose exec gateway pgw mode tor            # switch exit: warp | provider | tor
+docker compose exec gateway pgw mode tor            # switch exit for everyone: warp | provider | tor
+docker compose exec gateway pgw device laptop tor   # this device only (back with: default)
 docker compose exec gateway pgw status              # health check
 ```
 
-Device configs (with their private keys) are stored in `data/gateway/peers/`. Keep `data/` private and backed up.
+Device configs (with their private keys) are stored in `data/gateway/peers/`. Keep `data/` private and backed up —
+for example encrypt it to a key that lives on another computer, so the backup is useless to anyone who takes the Pi:
+
+```bash
+tar -czf - data .env | openssl cms -encrypt -aes256 -binary -outform DER backup.crt > pgw-backup.p7m
+```
+
+## Per-device exits
+
+Every device follows the default exit unless you give it its own: pick it from the dropdown next to the device in
+the dashboard, or `pgw device <name> warp|provider|tor|default`. The kill switch applies per device too — a device
+set to Tor can never leave outside Tor, even while everyone else uses WARP. In Tor mode the device's DNS is also
+resolved through Tor (a per-device AdGuard upstream).
+
+## Alerts
+
+Install the [ntfy](https://ntfy.sh) app, subscribe to a long random topic and set it in `.env`:
+
+```bash
+NTFY_URL=https://ntfy.sh/pgw-<20 random letters>
+```
+
+Each check must fail twice in a row before you're told, so short hiccups stay quiet; you get a second message when
+it's fixed. Alerts that can't be sent (the internet is down) are queued and delivered later. Use your own ntfy
+server if you prefer.
+
+## Leak test
+
+The dashboard's *Leak test* runs in your browser on the device you want to check: it compares the IP the internet
+sees (IPv4 and IPv6) with the exit the gateway assigned to that device, checks that a unique DNS lookup arrived at
+the gateway's own resolver, and lists the addresses WebRTC would reveal to a website.
 
 ## Adding a VPN provider (Proton, Mullvad, IVPN, …)
 
@@ -134,10 +178,45 @@ admin-only folder.
 | Devices connect but have no internet | Check `pgw status`. In provider/Tor mode the kill switch blocks traffic until that exit works. |
 | Dashboard shows "View only" | You opened it via the LAN address. Open it through the VPN (http://10.13.13.1) to switch exits. |
 
+## How it compares
+
+| | This project | [PiVPN](https://pivpn.io) | [wg-easy](https://github.com/wg-easy/wg-easy) | [Pi-hole](https://pi-hole.net) + VPN | [Algo](https://github.com/trailofbits/algo) |
+|---|---|---|---|---|---|
+| WireGuard server + QR codes | ✓ | ✓ | ✓ | separate | ✓ |
+| Ad/tracker DNS filter | ✓ AdGuard | – | – | ✓ | basic |
+| Hides your IP from sites | ✓ WARP / provider / Tor | – (home IP) | – (home IP) | – | ✓ (cloud VPS) |
+| Double hop, no single company sees both ends | ✓ | – | – | – | – |
+| Tor exit, per device | ✓ | – | – | – | – |
+| Kill switch (fails closed) | ✓ | – | – | – | – |
+| Live dashboard, history, leak test | ✓ | – | traffic only | DNS only | – |
+| Push alerts | ✓ | – | – | – | – |
+| Runs at home, no monthly cost | ✓ | ✓ | ✓ | ✓ | – (VPS) |
+
+The others are good at what they do — PiVPN and wg-easy are the simplest way to reach your home network from outside.
+This project is for the opposite direction: making your devices' traffic *leave* privately.
+
+## Threat model
+
+**Protects against**
+- Your ISP, mobile carrier or a public Wi-Fi operator logging or selling the sites you visit (all they see is
+  encrypted WireGuard to your home and encrypted traffic to Cloudflare).
+- Sites and ad networks learning your home IP / location (provider or Tor mode).
+- One VPN company holding both your identity and your browsing (provider mode: double hop).
+- Leaks when an exit fails (kill switch), DNS leaks (all DNS forced through AdGuard), IPv6 leaks (blocked).
+- Ads, trackers and malware domains on every device, including ones where you can't install a blocker (TVs, consoles).
+
+**Does not protect against**
+- Your browser identifying you: logins, cookies and fingerprinting. Use a privacy browser; for anonymity, Tor Browser.
+- A compromised gateway host or someone with physical access to it (it holds all keys — encrypt your backups).
+- Global adversaries correlating traffic timing; Cloudflare and your provider cooperating.
+- Malware on your own devices.
+
 ## Security notes & limits
 
-- The gateway container runs **privileged with host networking**: it has to create interfaces, routes and firewall
-  rules on the host. Treat the host as part of your security boundary, and keep it updated.
+- The gateway container is **not privileged**, but it has `NET_ADMIN` on the host's network stack (it has to create
+  interfaces, routes and firewall rules). Treat the host as part of your security boundary, and keep it updated.
+- The dashboard and AdGuard admin are only reachable through the VPN; nothing is exposed to the internet except the
+  WireGuard port, which ignores anything without a valid key.
 - **WARP is not anonymity.** Cloudflare sees your IP. Use the provider or Tor mode when that matters.
 - **Your browser identifies you more than your IP does** (cookies, logins, fingerprinting). Pair this with a
   privacy-focused browser; for real anonymity use Tor Browser.
@@ -146,10 +225,20 @@ admin-only folder.
 ## Development
 
 ```bash
-sudo bash tests/smoke.sh   # builds the image and runs 24 checks in an isolated network namespace
+sudo bash tests/smoke.sh   # builds the image and runs ~50 checks in an isolated network namespace
 ```
 
-The smoke test uses an offline stand-in for WARP (`PGW_TEST=1`) and never touches the host's own network.
+The smoke test runs the container unprivileged exactly like `docker-compose.yml` does, uses offline stand-ins for
+WARP and the provider (`PGW_TEST=1`) and never touches the host's own network. It covers the kill switch, per-device
+exits, failover, fail-closed Tor mode and the dashboard API (including CSRF and input validation).
+
+Releases (`v*` tags) publish signed multi-arch images to `ghcr.io/jmjaj/pi-privacy-gateway`. Verify one with:
+
+```bash
+cosign verify ghcr.io/jmjaj/pi-privacy-gateway:latest \
+  --certificate-identity-regexp 'https://github.com/JMJAJ/pi-privacy-gateway/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
 
 ## License
 

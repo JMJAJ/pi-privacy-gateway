@@ -69,7 +69,6 @@ function histPush(s) {
 const series = (key) => H[key] || [];
 
 /* ----------------------------------------------------------------- charts */
-/* ----------------------------------------------------------------- charts */
 const tooltip = $('tooltip');
 // clean axis: step is 1/2/5 x 10^k, 2-5 gridlines, top = whole number of steps
 function niceScale(v) {
@@ -81,15 +80,18 @@ function niceScale(v) {
 }
 // time labels that never collide: fewer when the plot is narrow
 const xMarks = (pw) => (pw < 220 ? [5, 0] : pw < 420 ? [5, 3, 1, 0] : [5, 4, 3, 2, 1, 0]);
+// '-12h' style label for a point `sec` seconds before now, unit picked from the chart's span
+const agoLabel = (sec, span) => span <= 3600 ? `\u2212${Math.round(sec / 60)}m` : span <= 172800 ? `\u2212${Math.round(sec / 3600)}h` : `\u2212${Math.round(sec / 86400)}d`;
 
 class LineChart {
-  /** opts: { lines: [{label, color: '--s1', data: () => []}], fmt, minMax, fixedMax } */
+  /** opts: { lines: [{label, color: '--s1', data: () => []}], fmt, minMax, fixedMax,
+   *          src: () => ({t: [...], span: seconds})  (optional: history instead of the live 5 min) } */
   constructor(el, opts) {
     this.el = el; this.o = opts; this.hover = null;
     this.c = document.createElement('canvas');
     el.appendChild(this.c);
     this.c.setAttribute('role', 'img');
-    this.c.setAttribute('aria-label', opts.lines.map((l) => l.label).join(' and ') + ' over the last 5 minutes');
+    this.c.setAttribute('aria-label', opts.lines.map((l) => l.label).join(' and ') + (opts.src ? ' over time' : ' over the last 5 minutes'));
     this.c.addEventListener('mousemove', (e) => { this.hover = e; this.draw(); });
     this.c.addEventListener('mouseleave', () => { this.hover = null; tooltip.hidden = true; this.draw(); });
     new ResizeObserver(() => this.draw()).observe(el);
@@ -105,7 +107,9 @@ class LineChart {
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, W, Hh);
     const lines = this.o.lines.map((l) => ({ ...l, d: l.data() }));
-    const n = H.t.length;
+    const src = this.o.src ? this.o.src() : null;
+    const T = src ? (src.t || []) : H.t, span = src ? (src.span || 3600) : HIST_MAX;
+    const n = T.length;
     let peak = this.o.fixedMax || 0;
     if (!this.o.fixedMax) for (const l of lines) for (const v of l.d) if (v != null && v > peak) peak = v;
     const sc = this.o.fixedMax ? { step: this.o.fixedMax / 4, ticks: 4, max: this.o.fixedMax } : niceScale(Math.max(peak, this.o.minMax || 0));
@@ -125,14 +129,15 @@ class LineChart {
       g.fillStyle = css('--muted'); g.textAlign = 'right';
       g.fillText(labels[i], pad.l - 6, y);
     }
-    // x labels: -5 min ... now
+    // x labels: -span ... now
     g.textAlign = 'center'; g.fillStyle = css('--muted');
     for (const m of xMarks(pw)) {
       const x = pad.l + pw * (1 - m / 5);
-      g.fillText(m ? '−' + m + 'm' : 'now', Math.min(Math.max(x, pad.l + 12), W - pad.r - 12), Hh - 8);
+      g.fillText(m ? agoLabel((span * m) / 5, span) : 'now', Math.min(Math.max(x, pad.l + 12), W - pad.r - 12), Hh - 8);
     }
     if (n < 2) return;
-    const X = (i) => pad.l + pw * (1 - (H.t[n - 1] - H.t[i]) / HIST_MAX);
+    const tEnd = src ? Math.max(T[n - 1], Date.now() / 1000) : T[n - 1];
+    const X = (i) => pad.l + pw * (1 - (tEnd - T[i]) / span);
     const Y = (v) => pad.t + ph - (ph * Math.min(v, max)) / max;
     for (const l of lines) {
       const col = css(l.color);
@@ -158,7 +163,8 @@ class LineChart {
       const x = X(best);
       g.strokeStyle = css('--axis'); g.lineWidth = 1;
       g.beginPath(); g.moveTo(Math.round(x) + .5, pad.t); g.lineTo(Math.round(x) + .5, pad.t + ph); g.stroke();
-      let html = `<div class="tt-t">${new Date(H.t[best] * 1000).toLocaleTimeString()}</div>`;
+      const when = new Date(T[best] * 1000);
+      let html = `<div class="tt-t">${src && span > 3600 ? when.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : when.toLocaleTimeString()}</div>`;
       for (const l of lines) {
         const v = l.d[best]; if (v == null) continue;
         g.beginPath(); g.arc(x, Y(v), 4, 0, Math.PI * 2);
@@ -306,6 +312,7 @@ function render() {
   if (w.warp !== 'on' && !tor) alerts.push('WARP is not connected: VPN traffic is blocked by the kill switch');
   if (prov && !pv.ip) alerts.push(`${modeName('provider')} is not connected: VPN traffic is blocked until it is`);
   if (tor && !T.exit_ip) alerts.push('Tor is not connected: VPN traffic is blocked until it is');
+  if (S.failover) alerts.push(`${modeName('provider')} is down: its devices are temporarily using WARP (failover)`);
   if (S.clock_offset_s != null && Math.abs(S.clock_offset_s) > 60) alerts.push(`System clock is off by ${Math.round(S.clock_offset_s)} s: Tor will not work`);
   const bn = $('banner');
   if (!switching) {
@@ -328,7 +335,7 @@ function render() {
   renderStack(mode, ex, w, pv, T, ks, peers, online, down, dns, hasProv);
   renderAnatomy(mode);
   ensureIfaceCharts(S.ifaces || []);
-  renderTraffic(peers);
+  renderTraffic();
   renderRoute(mode, ex, w, pv, T, hasProv);
   renderDns(dns);
   renderSystem(S.system || {}, pw);
@@ -416,18 +423,12 @@ function renderAnatomy(mode) {
   $('anatomy').innerHTML = html;
 }
 
-function renderTraffic(peers) {
+function renderTraffic() {
   for (const i of S.ifaces || []) {
     const r = (S.rates || {})[i.key] || {}, el = $('mv-' + i.key);
     if (el) el.innerHTML = `<span class="sw" style="background:var(--s1)"></span>${fmtBps(r.rx_bps)} &nbsp;<span class="sw" style="background:var(--s2)"></span>${fmtBps(r.tx_bps)}`;
   }
-  const pr = S.peer_rates || {};
-  $('tbl-peers').innerHTML = '<thead><tr><th>Device</th><th>VPN IP</th><th>Connected from</th><th>Last handshake</th><th class="n">↓ now</th><th class="n">↑ now</th><th class="n">↓ total</th><th class="n">↑ total</th></tr></thead><tbody>' +
-    (peers.length ? peers.map((p) => {
-      const r = pr[p.name] || {};
-      return `<tr><td>${chip(isOnline(p) ? 'good' : 'off', p.name)}</td><td class="mono">${esc(p.allowed.split('/')[0])}</td><td class="mono">${esc(p.endpoint || (trusted ? '—' : 'hidden'))}</td><td>${ago(p.handshake_age)}</td>
-        <td class="n">${fmtBps(r.down_bps)}</td><td class="n">${fmtBps(r.up_bps)}</td><td class="n">${fmtBytes(p.tx)}</td><td class="n">${fmtBytes(p.rx)}</td></tr>`;
-    }).join('') : '<tr><td colspan="8" class="muted">No devices yet. Add one with <code>docker compose exec gateway pgw add-peer phone</code></td></tr>') + '</tbody>';
+  renderDevices();
 }
 
 function renderRoute(mode, ex, w, pv, T, hasProv) {
@@ -480,7 +481,7 @@ function renderSystem(sys, pw) {
   $('power-card').hidden = !pw;
   if (pw) {
     const parts = pw.parts || [];
-    $('power').innerHTML = `<div class="power-hero"><span class="big">${num(pw.total_w, 2)}</span><span class="unit">W</span><span class="muted">≈ ${num(pw.amps_5v, 2)} A at 5.1 V · ${num(pw.total_w * 24 / 1000, 3)} kWh/day</span></div>
+    $('power').innerHTML = `<div class="power-hero"><span class="big">${num(pw.total_w, 2)}</span><span class="unit">W</span><span class="muted">≈ ${num(pw.amps_5v, 2)} A at 5.1 V · ${num(pw.total_w * 24 / 1000, 3)} kWh/day ≈ <b>${money(pw.total_w * 24 / 1000 * priceGet().per_kwh)}</b>/day · ${money(pw.total_w * 24 * 30 / 1000 * priceGet().per_kwh)}/month · ${money(pw.total_w * 24 * 365 / 1000 * priceGet().per_kwh)}/year</span></div>
       <div class="stackbar">${parts.map((p) => `<div style="flex:${p.w} 0 0" title="${esc(p.name)} ${p.w} W"></div>`).join('')}</div>
       <div class="legend">${parts.map((p, i) => `<span><span class="sw" style="background:var(--s${i + 1});height:10px;width:10px;border-radius:3px"></span>${esc(p.name)} ${num(p.w, 2)} W</span>`).join('')}</div>
       <p class="hint">Model for a Raspberry Pi 4: board + CPU share by load × clock + USB Wi-Fi by traffic. For exact numbers use a USB-C power meter.</p>`;
@@ -531,6 +532,183 @@ function renderSecurity(ks, dns, w, pv, T, hasProv) {
     ports.map((p) => `<tr><td>${esc(p.proto.toUpperCase())}</td><td class="mono">${esc(p.addr)}</td><td>${esc(PORT_NOTES[+p.addr.split(':').pop()] || '')}</td></tr>`).join('') + '</tbody>';
 }
 
+
+
+/* ---------------------------------------------------------------- devices */
+// list + per-device exit + add (QR) + remove. Managing needs a VPN client (and ADMIN_IPS if set).
+let DEV = { devices: [], can_manage: false, default: 'warp', provider: null };
+let devSig = '';
+const postJSON = async (url, body) => {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Pi-Control': '1' }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || j.log || ('HTTP ' + r.status));
+  return j;
+};
+async function refreshDevices() {
+  if (!trusted) return;
+  try { DEV = await (await fetch('/api/devices', { cache: 'no-store' })).json(); devSig = ''; renderDevices(); } catch (_) { /* next tick */ }
+}
+setInterval(refreshDevices, 10000);
+
+function exitOptions(cur) {
+  const opts = [['default', `Default (${modeName(DEV.default)})`], ['warp', 'WARP']];
+  if (DEV.provider) opts.push(['provider', DEV.provider]);
+  opts.push(['tor', 'Tor']);
+  return opts.map(([v, l]) => `<option value="${v}"${v === cur ? ' selected' : ''}>${esc(l)}</option>`).join('');
+}
+function renderDevices() {
+  const peers = (S && S.wg1 && S.wg1.peers) || [];
+  const live = Object.fromEntries(peers.map((p) => [p.name, p]));
+  const list = trusted && DEV.devices.length ? DEV.devices : peers.map((p) => ({ name: p.name, ip: p.allowed.split('/')[0], exit: ((S.device_modes || {})[p.allowed.split('/')[0]]) || 'default' }));
+  $('dev-add').hidden = !(trusted && DEV.can_manage);
+  const sig = JSON.stringify([list.map((d) => [d.name, d.ip, d.exit]), DEV.can_manage, DEV.default, DEV.provider, trusted]);
+  if (sig !== devSig) {
+    devSig = sig;
+    const manage = trusted && DEV.can_manage;
+    $('tbl-peers').innerHTML = '<thead><tr><th>Device</th><th>VPN IP</th><th>Exit</th><th>Connected from</th><th>Last handshake</th><th class="n">↓ now</th><th class="n">↑ now</th><th class="n">↓ total</th><th class="n">↑ total</th>' + (manage ? '<th></th>' : '') + '</tr></thead><tbody>' +
+      (list.length ? list.map((d) => `<tr>
+        <td id="st-${esc(d.name)}"></td><td class="mono">${esc(d.ip)}</td>
+        <td><select class="sel" data-dev="${esc(d.name)}" ${manage ? '' : 'disabled'} aria-label="Exit for ${esc(d.name)}">${exitOptions(d.exit)}</select></td>
+        <td class="mono" id="ep-${esc(d.name)}"></td><td id="hs-${esc(d.name)}"></td>
+        <td class="n" id="dn-${esc(d.name)}"></td><td class="n" id="up-${esc(d.name)}"></td><td class="n" id="td-${esc(d.name)}"></td><td class="n" id="tu-${esc(d.name)}"></td>
+        ${manage ? `<td class="actions"><button class="btn ghost small" data-qr="${esc(d.name)}">QR</button><button class="btn ghost small danger" data-rm="${esc(d.name)}">Remove</button></td>` : ''}</tr>`).join('')
+        : `<tr><td colspan="10" class="muted">No devices yet.${manage ? ' Add one above.' : ''}</td></tr>`) + '</tbody>';
+  }
+  const pr = (S && S.peer_rates) || {};
+  for (const d of list) {
+    const p = live[d.name] || {}, r = pr[d.name] || {}, set = (id, v) => { const el = $(id + '-' + d.name); if (el) el.innerHTML = v; };
+    set('st', chip(isOnline(p) ? 'good' : 'off', d.name));
+    set('ep', esc(p.endpoint || (trusted ? '—' : 'hidden')));
+    set('hs', ago(p.handshake_age));
+    set('dn', fmtBps(r.down_bps)); set('up', fmtBps(r.up_bps)); set('td', fmtBytes(p.tx)); set('tu', fmtBytes(p.rx));
+  }
+}
+$('tbl-peers').addEventListener('change', async (e) => {
+  const sel = e.target.closest('select[data-dev]'); if (!sel) return;
+  sel.disabled = true;
+  try { await postJSON('/api/devices/exit', { name: sel.dataset.dev, mode: sel.value }); toast(`${sel.dataset.dev} now exits via ${sel.value === 'default' ? 'the default' : modeName(sel.value)}`); }
+  catch (err) { toast('Could not change exit: ' + err.message, true); }
+  await refreshDevices();
+});
+$('tbl-peers').addEventListener('click', async (e) => {
+  const qr = e.target.closest('[data-qr]'), rm = e.target.closest('[data-rm]');
+  if (qr) { try { showDevice(await postJSON('/api/devices/qr', { name: qr.dataset.qr }), false); } catch (err) { toast(err.message, true); } }
+  if (rm && confirm(`Remove "${rm.dataset.rm}"? Its key stops working immediately.`)) {
+    try { await postJSON('/api/devices/remove', { name: rm.dataset.rm }); toast(`Removed ${rm.dataset.rm}`); } catch (err) { toast(err.message, true); }
+    await refreshDevices();
+  }
+});
+$('dev-add').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const name = $('dev-name').value.trim();
+  if (!/^[A-Za-z0-9_-]{1,32}$/.test(name)) { toast('Use 1-32 letters, digits, - or _', true); return; }
+  $('dev-add-btn').disabled = true;
+  try { showDevice(await postJSON('/api/devices/add', { name }), true); $('dev-name').value = ''; }
+  catch (err) { toast('Could not add: ' + err.message, true); }
+  $('dev-add-btn').disabled = false;
+  await refreshDevices();
+});
+function showDevice(b, isNew) {
+  $('modal-title').textContent = (isNew ? 'New device: ' : 'Device: ') + b.name;
+  $('modal-qr').src = b.qr;
+  const url = URL.createObjectURL(new Blob([b.conf + '\n'], { type: 'text/plain' }));
+  $('modal-dl').href = url; $('modal-dl').download = b.name + '.conf';
+  $('modal').hidden = false; $('modal-close').focus();
+}
+$('modal-close').onclick = () => { $('modal').hidden = true; $('modal-qr').src = ''; };
+$('modal').addEventListener('click', (e) => { if (e.target === $('modal')) $('modal-close').click(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('modal').hidden) $('modal-close').click(); });
+
+let toastTimer = null;
+function toast(msg, bad) {
+  const t = $('toast'); t.textContent = msg; t.className = 'toast' + (bad ? ' bad' : ''); t.hidden = false;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 4500);
+}
+
+/* ---------------------------------------------------------------- history */
+let HIST = { t: [], span: 86400 }, histRange = '24h';
+const hs = (k) => () => HIST[k] || [];
+function makeHistoryCharts() {
+  $('lg-hist').innerHTML = legend([{ label: 'Download', color: '--s1' }, { label: 'Upload', color: '--s2' }]);
+  const src = () => HIST;
+  charts.push(new LineChart($('ch-hist-net'), { src, lines: [{ label: 'Download', color: '--s1', data: hs('down') }, { label: 'Upload', color: '--s2', data: hs('up') }], fmt: bpsFmt, minMax: 1e5 }));
+  charts.push(new LineChart($('ch-hist-cpu'), { src, lines: [{ label: 'CPU', color: '--s1', data: hs('cpu') }], fmt: (v) => Math.round(v) + '%', fixedMax: 100 }));
+  charts.push(new LineChart($('ch-hist-temp'), { src, lines: [{ label: 'Temperature', color: '--s2', data: hs('temp') }], fmt: (v) => num(v, 0) + ' °C', minMax: 80 }));
+}
+async function loadHistoryRange() {
+  try {
+    HIST = await (await fetch('/api/history?range=' + histRange, { cache: 'no-store' })).json();
+    const pts = (HIST.t || []).length;
+    $('hist-meta').textContent = pts ? `${pts} points · ${new Date(HIST.t[0] * 1000).toLocaleString()} → now` : 'No history yet: one point is saved per minute.';
+    charts.forEach((c) => c.draw());
+  } catch (_) { /* keep the last data */ }
+}
+document.querySelectorAll('[data-range]').forEach((b) => b.addEventListener('click', () => {
+  histRange = b.dataset.range;
+  document.querySelectorAll('[data-range]').forEach((x) => x.classList.toggle('on', x === b));
+  loadHistoryRange();
+}));
+setInterval(() => { if (!document.hidden) loadHistoryRange(); }, 60000);
+
+/* -------------------------------------------------------------- leak test */
+// Runs on THIS device: exit IP, IPv6 bypass, which DNS resolver it really uses, WebRTC exposure.
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+async function traceVia(url) { const t = await withTimeout(fetch(url, { cache: 'no-store' }).then((r) => r.text()), 6000); return Object.fromEntries(t.trim().split('\n').map((l) => l.split('='))); }
+function webrtcIps() {
+  return new Promise((resolve) => {
+    if (!window.RTCPeerConnection) { resolve(null); return; }
+    const ips = new Set();
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }] });
+    pc.createDataChannel('x');
+    pc.onicecandidate = (e) => { if (e.candidate) { const m = /(\d+\.\d+\.\d+\.\d+|[0-9a-f]{1,4}(?::[0-9a-f]{0,4}){2,7})/i.exec(e.candidate.candidate); if (m && / srflx /.test(e.candidate.candidate)) ips.add(m[1]); } };
+    pc.createOffer().then((o) => pc.setLocalDescription(o)).catch(() => {});
+    setTimeout(() => { pc.close(); resolve([...ips]); }, 4000);
+  });
+}
+async function runLeakTest() {
+  const out = $('leak-results'), btn = $('leak-run');
+  const rows = [];
+  const show = () => { out.innerHTML = '<ul class="checks">' + rows.map((r) => `<li>${r.pending ? chip('off', 'Testing') : chip(r.ok ? 'good' : r.warn ? 'warn' : 'crit', r.ok ? 'Pass' : r.warn ? 'Check' : 'Leak')}<span>${r.name}</span><span class="v">${r.detail || ''}</span></li>`).join('') + '</ul>'; };
+  const step = async (name, fn) => { const r = { name, pending: true }; rows.push(r); show(); try { Object.assign(r, await fn()); } catch (e) { Object.assign(r, { ok: false, detail: esc(e.message) }); } r.pending = false; show(); };
+  if (!trusted) { out.innerHTML = '<p class="muted">Open this page through the VPN (http://' + esc(S && S.vpn_ip || '10.13.13.1') + '/dashboard) to test this device.</p>'; return; }
+  btn.disabled = true;
+  const exp = await (await fetch('/api/leak/expect', { cache: 'no-store' })).json();
+  const ispIp = ((S.exits || {}).isp || {}).ip;
+  await step('Traffic leaves through the gateway', async () => {
+    const t = await traceVia('https://1.1.1.1/cdn-cgi/trace');
+    const ok = t.ip && t.ip !== ispIp && (exp.mode === 'tor' || !exp.ip || t.ip === exp.ip);
+    return { ok, detail: `websites see <b class="mono">${esc(t.ip)}</b> (${esc(modeName(exp.mode))}${exp.mode === 'tor' ? ', varies per site' : ''})${t.ip === ispIp ? ' = your REAL IP' : ''}` };
+  });
+  await step('IPv6 can’t bypass the VPN', async () => {
+    try { const t = await traceVia('https://[2606:4700:4700::1111]/cdn-cgi/trace'); return { ok: false, detail: `reached the internet over IPv6 as <b class="mono">${esc(t.ip)}</b>` }; }
+    catch (_) { return { ok: true, detail: 'IPv6 is blocked' }; }
+  });
+  await step('DNS goes through the gateway (no DNS leak)', async () => {
+    const token = Array.from(crypto.getRandomValues(new Uint8Array(10)), (b) => (b % 36).toString(36)).join('') + Date.now().toString(36);
+    await withTimeout(fetch(`https://pgwleak${token}.example.com/`, { mode: 'no-cors', cache: 'no-store' }).catch(() => {}), 4000).catch(() => {});
+    await new Promise((r) => setTimeout(r, 800));
+    const j = await postJSON('/api/leak/dns', { token: 'pgwleak' + token });
+    if (j.seen === null) return { warn: true, ok: false, detail: 'AdGuard not reachable, can’t tell' };
+    return j.seen ? { ok: true, detail: 'lookups reach AdGuard' } : { ok: false, detail: 'your browser/OS asked another DNS server (turn off "secure DNS" in the browser, Android "Private DNS")' };
+  });
+  await step('WebRTC doesn’t reveal your real IP', async () => {
+    const ips = await webrtcIps();
+    if (ips === null) return { ok: true, detail: 'WebRTC disabled in this browser' };
+    const real = ispIp && ips.includes(ispIp);
+    return { ok: !real, detail: ips.length ? `public address seen: <span class="mono">${ips.map(esc).join(', ')}</span>${real ? ' = your REAL IP' : ''}` : 'no public address exposed' };
+  });
+  btn.disabled = false;
+}
+$('leak-run').onclick = runLeakTest;
+
+/* ------------------------------------------------------- electricity cost */
+const priceGet = () => { try { const p = JSON.parse(localStorage.getItem('pgw-price') || 'null'); if (p) return p; } catch (_) { /* default */ } return (S && S.price) || { per_kwh: 0.3, currency: '€' }; };
+function initPrice() {
+  const p = priceGet(); $('kwh-price').value = p.per_kwh; $('kwh-cur').value = p.currency;
+  const save = () => { try { localStorage.setItem('pgw-price', JSON.stringify({ per_kwh: parseFloat(String($('kwh-price').value).replace(',', '.')) || 0, currency: $('kwh-cur').value.slice(0, 4) || '€' })); } catch (_) { /* ignore */ } if (S) render(); };
+  $('kwh-price').addEventListener('input', save); $('kwh-cur').addEventListener('input', save);
+}
+const money = (v) => { const p = priceGet(); return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + p.currency; };
 
 /* ------------------------------------------------------------ live stream */
 let es = null, lastMsg = 0;
@@ -646,4 +824,6 @@ $('theme-btn').onclick = () => {
 
 /* ------------------------------------------------------------------ boot */
 makeCharts();
-loadHistory().then(connect);
+makeHistoryCharts();
+initPrice();
+loadHistory().then(connect).then(() => setTimeout(() => { refreshDevices(); loadHistoryRange(); }, 1500));

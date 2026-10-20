@@ -191,6 +191,24 @@ main { max-width: 1320px; margin: 0 auto; padding: 16px 20px 8px; }
 .svc span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 12px; }
 .core-row { display: grid; grid-template-columns: 54px 1fr 50px; gap: 10px; align-items: center; font-size: 12.5px; padding: 3px 0; }
 .core-row .n { text-align: right; font-variant-numeric: tabular-nums; }
+.price-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12.5px; color: var(--ink-2); margin: 4px 0 8px; }
+.price-row input, .dev-add input, .sel { font: 13px var(--mono); padding: 5px 8px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--surface-2); color: var(--ink); }
+.price-row input { width: 80px; } .price-row input.cur { width: 52px; }
+.dev-add { display: flex; gap: 6px; } .dev-add input { width: 170px; }
+.sel { font-family: inherit; padding: 4px 6px; } .sel:disabled { opacity: .7; }
+.btn.small { padding: 4px 10px; font-size: 12px; } .btn.danger { color: var(--crit); }
+.actions { white-space: nowrap; display: flex; gap: 6px; }
+.grid.three.hist { margin-bottom: 0; } .grid.three.hist .chart { height: 140px; }
+.toast { position: fixed; z-index: 60; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--surface); color: var(--ink); border: 1px solid var(--border-strong); border-left: 4px solid var(--good); border-radius: 10px; padding: 10px 14px; font-size: 13px; box-shadow: 0 8px 28px rgba(0,0,0,.25); max-width: calc(100vw - 32px); }
+.toast.bad { border-left-color: var(--crit); }
+.modal { position: fixed; inset: 0; z-index: 70; background: rgba(0,0,0,.55); display: grid; place-items: center; padding: 16px; }
+.modal[hidden] { display: none; }
+.modal-box { background: var(--surface); border: 1px solid var(--border-strong); border-radius: 16px; padding: 20px; max-width: 380px; width: 100%; text-align: center; }
+.modal-box h2 { font-size: 17px; margin-bottom: 4px; }
+.modal-box img { width: 100%; max-width: 320px; height: auto; image-rendering: pixelated; background: #fff; border-radius: 10px; margin: 10px 0; }
+.warn-text { font-size: 12px; color: var(--crit); }
+.modal-actions { display: flex; gap: 8px; justify-content: center; margin-top: 10px; }
+a.btn { text-decoration: none; display: inline-block; }
 .power-hero { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .power-hero .big { font-size: 38px; font-weight: 650; letter-spacing: -.5px; }
 .power-hero .unit { font-size: 16px; color: var(--ink-2); }

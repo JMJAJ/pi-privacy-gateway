@@ -1,0 +1,68 @@
+#!/bin/bash
+# pgw-alert - push notifications (ntfy) when part of the gateway breaks or recovers.
+# Enabled by NTFY_URL (e.g. https://ntfy.sh/<long-random-topic> or your own ntfy server).
+# A check must fail twice in a row before it alerts; recovery is reported too. If the gateway
+# can't reach the internet, messages are queued and sent once it can. No IPs or keys are sent.
+. /usr/local/bin/pgw-lib
+[ -n "${NTFY_URL:-}" ] || { log "alerts disabled (set NTFY_URL to enable)"; exec sleep infinity; }
+STATE=/run/pgw/alert; QUEUE="$CFG/alert-queue"
+mkdir -p "$STATE"; touch "$QUEUE"
+
+send() { printf '%s|%s|%s|%s\n' "$1" "$2" "$(date '+%H:%M')" "$3" >> "$QUEUE"; }
+flush() {
+  [ -s "$QUEUE" ] || return 0
+  local keep; keep=$(mktemp)
+  while IFS='|' read -r prio tags when msg; do
+    curl -sf -m 10 -H "Title: Privacy gateway" -H "Priority: $prio" -H "Tags: $tags" \
+         -d "$msg ($when)" "$NTFY_URL" >/dev/null 2>&1 || printf '%s|%s|%s|%s\n' "$prio" "$tags" "$when" "$msg" >> "$keep"
+  done < "$QUEUE"
+  mv "$keep" "$QUEUE"
+}
+hs_age() {
+  local t; t=$(wg show "$1" latest-handshakes 2>/dev/null | awk '{print $2}' | sort -n | tail -1)
+  [ -n "$t" ] && [ "$t" -gt 0 ] && echo $(( $(date +%s) - t )) || echo 9999
+}
+clock_ok() {  # compare with Cloudflare's HTTP Date header; Tor needs a correct clock
+  local d; d=$(curl -sI -m 6 https://1.1.1.1/ | sed -n 's/^[Dd]ate: //p' | tr -d '\r')
+  [ -z "$d" ] && return 0
+  [ $(( $(date +%s) - $(date -d "$d" +%s) )) -lt 120 ] && [ $(( $(date -d "$d" +%s) - $(date +%s) )) -lt 120 ]
+}
+undervolt() {
+  local h; for h in /sys/class/hwmon/hwmon*; do [ "$(cat "$h/name" 2>/dev/null)" = rpi_volt ] && [ "$(cat "$h/in0_lcrit_alarm")" = 1 ] && return 0; done; return 1
+}
+
+CHECKS=(
+  "warp|Cloudflare WARP tunnel|[ \$(hs_age wg0) -lt 200 ]"
+  "provider|$PROVIDER_NAME tunnel|! pgw-exit configured provider || [ \$(hs_age wg2) -lt 200 ]"
+  "failover|exit failover (provider devices are on WARP)|[ ! -f /run/pgw/failover ]"
+  "tor|Tor|! pgw-exit configured tor || ss -ltn | grep -q '127.0.0.1:9050 '"
+  "killswitch|kill switch|iptables -C FORWARD -j PIX_FWD"
+  "dns|AdGuard DNS|ss -lnu | grep -q ':53 '"
+  "temp|temperature below 75 C|[ \$(cut -c1-2 /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo 0) -lt 75 ]"
+  "power|power supply voltage|! undervolt"
+  "disk|disk below 90% full|[ \$(df --output=pcent /config | tail -1 | tr -dc 0-9) -lt 90 ]"
+  "clock|clock correct (Tor needs it)|clock_ok"
+)
+
+send default "white_check_mark" "Gateway started - alerts are on."
+sleep 90
+while true; do
+  for c in "${CHECKS[@]}"; do
+    IFS='|' read -r name desc test <<< "$c"
+    fails=$(cat "$STATE/$name.fails" 2>/dev/null || echo 0)
+    if eval "$test" >/dev/null 2>&1; then
+      if [ -f "$STATE/$name.down" ]; then
+        send default "white_check_mark" "OK again: $desc (was down $(( ($(date +%s) - $(cat "$STATE/$name.down")) / 60 )) min)"
+        rm -f "$STATE/$name.down"
+      fi
+      echo 0 > "$STATE/$name.fails"
+    else
+      fails=$((fails + 1)); echo "$fails" > "$STATE/$name.fails"
+      if [ "$fails" -eq 2 ] && [ ! -f "$STATE/$name.down" ]; then
+        date +%s > "$STATE/$name.down"; send high "warning" "PROBLEM: $desc"
+      fi
+    fi
+  done
+  flush
+  sleep 60
+done
