@@ -290,6 +290,21 @@ def undervoltage():
     return None
 
 
+_uv = {"events": 0, "last": None, "prev": False}
+
+
+def supply_health():
+    """Under-voltage now, plus how many dips we have seen since the dashboard started (the Pi 4 has no
+    current sensor: this flag is the only real signal about the power supply)."""
+    now = undervoltage()
+    if now and not _uv["prev"]:
+        _uv["events"] += 1
+    if now:
+        _uv["last"] = time.time()
+    _uv["prev"] = bool(now)
+    return {"now": now, "events": _uv["events"], "last_ts": _uv["last"]}
+
+
 def medium():
     mem = {}
     for line in read("/proc/meminfo").splitlines():
@@ -309,7 +324,7 @@ def medium():
             "model": HARDWARE, "kernel": os.uname().release,
             "uptime_s": int(float(read("/proc/uptime", "0 0").split()[0])),
             "load": read("/proc/loadavg", "0 0 0").split()[:3], "cpu_mhz": round(arm_hz / 1e6) or None,
-            "undervoltage": undervoltage(),
+            "undervoltage": undervoltage(), "supply": supply_health(),
             "mem_total_mb": mem.get("MemTotal", 0) // 1024,
             "mem_used_mb": (mem.get("MemTotal", 0) - mem.get("MemAvailable", 0)) // 1024,
             "disk_total_gb": round(st.f_blocks * st.f_frsize / 1e9, 1),

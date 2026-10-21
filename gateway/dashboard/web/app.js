@@ -477,6 +477,18 @@ function renderDns(d) {
     : '<p class="muted">Nothing blocked yet.</p>';
 }
 
+// 5.1 V x 3 A: the official Raspberry Pi 4 supply. Shows how much of it the estimated draw uses.
+const PSU_W = 15.3;
+function headroomHtml(pw) {
+  const vals = series('power').filter((v) => Number.isFinite(v));
+  const peak = Math.max(pw.total_w, ...vals), pct = Math.min(100, peak / PSU_W * 100);
+  const lvl = pct < 60 ? 'good' : pct < 85 ? 'warn' : 'crit';
+  return `<div class="rows" style="margin-top:10px">` +
+    row('Supply headroom', `${chip(lvl, Math.round(pct) + '% of the ' + PSU_W + ' W budget at the recent peak')}`) +
+    `</div><div class="stackbar" title="peak ${num(peak, 1)} W of ${PSU_W} W"><div style="flex:${pct} 0 0;background:var(--s${lvl === 'good' ? 1 : 2})"></div><div style="flex:${100 - pct} 0 0;background:var(--line, #2a2a2a)"></div></div>` +
+    `<p class="hint">Now ${num(pw.total_w, 1)} W, peak ${num(peak, 1)} W (estimated). A 5 V fan adds about 0.5-1.5 W, so there is room unless the bar is above ~85%.</p>`;
+}
+
 function renderSystem(sys, pw) {
   $('power-card').hidden = !pw;
   if (pw) {
@@ -485,10 +497,11 @@ function renderSystem(sys, pw) {
       <div class="stackbar">${parts.map((p) => `<div style="flex:${p.w} 0 0" title="${esc(p.name)} ${p.w} W"></div>`).join('')}</div>
       <div class="legend">${parts.map((p, i) => `<span><span class="sw" style="background:var(--s${i + 1});height:10px;width:10px;border-radius:3px"></span>${esc(p.name)} ${num(p.w, 2)} W</span>`).join('')}</div>
       <p class="hint">Model for a Raspberry Pi 4: board + CPU share by load × clock + USB Wi-Fi by traffic. For exact numbers use a USB-C power meter.</p>`;
+    $('power').insertAdjacentHTML('beforeend', headroomHtml(pw));
   }
-  const uv = sys.undervoltage;
+  const uv = sys.undervoltage, sp = sys.supply || {};
   $('health').innerHTML = '<div class="rows">' +
-    (uv == null ? '' : row('Power supply', uv ? chip('crit', 'Under-voltage now') : chip('good', 'Voltage OK'))) +
+    (uv == null ? '' : row('Power supply', uv ? chip('crit', 'Under-voltage now') : sp.events ? chip('warn', `${sp.events} dip${sp.events > 1 ? 's' : ''} since start, last ${dur(Math.max(0, S.server_time - sp.last_ts))} ago - weak supply or cable`) : chip('good', 'No under-voltage since the dashboard started'))) +
     row('CPU clock', sys.cpu_mhz ? `${sys.cpu_mhz} MHz` : '—') +
     row('Memory', `${(sys.mem_used_mb || 0).toLocaleString()} / ${(sys.mem_total_mb || 0).toLocaleString()} MB`) +
     row('Disk (config volume)', `${sys.disk_used_gb ?? '—'} / ${sys.disk_total_gb ?? '—'} GB`) +
