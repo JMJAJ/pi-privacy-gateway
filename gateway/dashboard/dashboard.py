@@ -742,6 +742,31 @@ def expected_exit(client_ip):
 
 
 # ----------------------------------------------------------------- snapshot
+_MAC_RE = re.compile(r"\b(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}\b")
+
+
+def _scrub(o):
+    """For viewers outside the VPN: drop what only the owner needs - Wi-Fi names, MAC addresses,
+    router/LAN topology and listening ports (on a shared Wi-Fi this would map your network)."""
+    if isinstance(o, dict):
+        out = {}
+        for k, v in o.items():
+            if k in ("ssid", "bssid", "gateway", "mac", "hwaddr"):
+                out[k] = "hidden"
+            elif k == "endpoint":
+                out[k] = None
+            elif k == "listening":
+                out[k] = []
+            else:
+                out[k] = _scrub(v)
+        return out
+    if isinstance(o, list):
+        return [_scrub(v) for v in o]
+    if isinstance(o, str):
+        return _MAC_RE.sub("xx:xx:xx:xx:xx:xx", o)
+    return o
+
+
 def snapshot(trusted):
     with _lock:
         s = json.loads(json.dumps(_state, default=str))
@@ -753,6 +778,7 @@ def snapshot(trusted):
             s["exits"]["isp"] = {"redacted": True}
         for p in (s.get("wg1") or {}).get("peers", []):
             p["endpoint"] = None
+        s = _scrub(s)
     return s
 
 

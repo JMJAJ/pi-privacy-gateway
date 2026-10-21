@@ -211,6 +211,28 @@ This project is for the opposite direction: making your devices' traffic *leave*
 - Global adversaries correlating traffic timing; Cloudflare and your provider cooperating.
 - Malware on your own devices.
 
+## What each party can see
+
+| Who | Can see | Cannot see |
+|---|---|---|
+| **Websites** | the exit IP (WARP, provider or a Tor exit), your browser fingerprint, your logins | your home IP, your ISP, your location by IP |
+| **Your ISP** | encrypted WireGuard traffic to Cloudflare (so: that you use WARP), volume and timing | the sites, your DNS queries, which exit you picked, whether you use Tor |
+| **Cloudflare (WARP)** | your home IP, volume; in WARP mode also the sites you visit | page content (HTTPS); in provider/Tor mode, the final destinations |
+| **VPN provider** | the sites you visit, the WARP exit IP | your home IP |
+| **Everyone on your Wi-Fi** | your devices' MAC addresses, their DHCP host names, Wi-Fi names a device probes for | anything inside the tunnel. The gateway dashboard hides SSID, BSSID, MACs, router address and listening ports from non-VPN viewers |
+| **Services run by the gateway host itself** | apt, NTP, WARP registration and push alerts use the normal connection, so `ntfy.sh` sees your real IP | - |
+
+Things worth doing on your own devices (they are outside the gateway's reach):
+
+- **Random MAC address per network.** Android: *Wi-Fi, network, Privacy, Use randomized MAC*. iOS: *Private Wi-Fi Address*.
+  Windows (administrator): `netsh wlan set randomization enabled=yes interface="Wi-Fi"`, then
+  `netsh wlan set profileparameter name="<SSID>" randomization=yes`. Your router will hand the device a new address once.
+- **Don't let the PC probe for names.** Windows profiles set to "connect even if not broadcasting" announce that network's name
+  everywhere: `netsh wlan set profileparameter name="<SSID>" nonBroadcast=no`.
+- **Disable Teredo** (`netsh interface teredo set state disabled`): it tunnels IPv6 around the VPN's routing and encodes your public IPv4 in the address.
+- **Mesh/gaming VPNs** (Tailscale, Radmin, ZeroTier, ...) talk to their peers and coordination servers directly: pause them when you need the IP hidden.
+- **Host name**: a device's DHCP name (often your username) is visible on the LAN; choose a neutral one.
+
 ## Security notes & limits
 
 - The gateway container is **not privileged**, but it has `NET_ADMIN` on the host's network stack (it has to create
