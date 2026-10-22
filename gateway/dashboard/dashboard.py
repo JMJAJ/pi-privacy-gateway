@@ -45,6 +45,24 @@ _state = {}
 _history = {"t": deque(maxlen=HISTORY_LEN)}
 _speed = {"running": False, "mbps": None, "ts": None, "error": None}
 _mode_lock = threading.Lock()
+_tor_lock = threading.Lock()
+_tor_last = [0.0]
+
+
+def tor_restart():
+    """Stop Tor (at most once every 15 s); supervisord starts it again. The kill switch stays closed meanwhile."""
+    if not _tor_lock.acquire(blocking=False):
+        return False, "wait"
+    try:
+        if time.time() - _tor_last[0] < 15:
+            return False, "wait"
+        _tor_last[0] = time.time()
+        r = subprocess.run(["pkill", "-TERM", "-x", "tor"], capture_output=True, text=True, timeout=10)
+        return r.returncode == 0, "Tor is not running" if r.returncode else ""
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, str(e)[:200]
+    finally:
+        _tor_lock.release()
 _trace_lock = threading.Lock()
 _trace_cache = {}
 _last_view = 0.0
@@ -972,6 +990,11 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 b = peer_bundle(name)
                 self.send(200 if b else 404, b or {"error": "no config stored for that device"})
+        elif path == "/api/tor/restart":
+            if self.guarded_post() is None:
+                return
+            ok, msg = tor_restart()
+            self.send(200 if ok else 429 if msg == "wait" else 500, {"ok": ok, "error": None if ok else msg})
         elif path == "/api/leak/dns":
             body = self.guarded_post()
             if body is None:
