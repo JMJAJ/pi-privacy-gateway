@@ -448,6 +448,7 @@ function renderRoute(mode, ex, w, pv, T, hasProv) {
   const mx = Math.max(1, ...items.map((i) => i[1] || 0));
   $('latency').innerHTML = items.map(([k, v], i) =>
     `<div class="lat-row"><span>${esc(k)}</span><div class="hbar ${i === items.length - 1 ? 'tor' : ''}"><div style="width:${v ? Math.max(2, (100 * v) / mx) : 0}%"></div></div><span class="n">${v == null ? '—' : num(v, v < 10 ? 1 : 0) + ' ms'}</span></div>`).join('');
+  if ($('tor-restart')) $('tor-restart').hidden = !S.trusted;
   $('tor-hint').textContent = tor ? 'Your VPN traffic currently flows through this circuit' : 'Not carrying your traffic right now';
   const path = T.path || [];
   $('tor-circuit').innerHTML = (path.length ? '<div class="flow">' + ['<div class="hopbox"><div class="r">You</div><div class="nm">Gateway</div><div class="mono muted">via WARP</div></div>']
@@ -487,6 +488,22 @@ function headroomHtml(pw) {
     row('Supply headroom', `${chip(lvl, Math.round(pct) + '% of the ' + PSU_W + ' W budget at the recent peak')}`) +
     `</div><div class="stackbar" title="peak ${num(peak, 1)} W of ${PSU_W} W"><div style="flex:${pct} 0 0;background:var(--s${lvl === 'good' ? 1 : 2})"></div><div style="flex:${100 - pct} 0 0;background:var(--line, #2a2a2a)"></div></div>` +
     `<p class="hint">Now ${num(pw.total_w, 1)} W, peak ${num(peak, 1)} W (estimated). A 5 V fan adds about 0.5-1.5 W, so there is room unless the bar is above ~85%.</p>`;
+}
+
+// Tor sometimes sits without a circuit (stale guard, network change): restart it on demand
+if ($('tor-restart')) {
+  $('tor-restart').addEventListener('click', async () => {
+    const b = $('tor-restart'), label = 'Restart Tor';
+    b.disabled = true; b.textContent = 'Restarting...';
+    let msg = 'Failed';
+    try {
+      const r = await fetch('/api/tor/restart', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Pi-Control': '1' }, body: '{}' });
+      const j = await r.json().catch(() => ({}));
+      msg = r.ok ? 'Restarted - building circuits (up to a minute)' : (j.error || 'Failed');
+    } catch (_) { /* network error: keep "Failed" */ }
+    b.textContent = msg;
+    setTimeout(() => { b.disabled = false; b.textContent = label; }, 15000);
+  });
 }
 
 function renderSystem(sys, pw) {

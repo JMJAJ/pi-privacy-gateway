@@ -85,6 +85,8 @@ t "device API needs the CSRF header"     "x 'curl -s -d \"{\\\"name\\\":\\\"x\\\
 t "remove device from the dashboard"     "api /api/devices/remove '{\"name\":\"tablet\"}' | grep -q '\"ok\": true'"
 t "history API answers"                  "x 'curl -sf \"http://127.0.0.1:8080/api/history?range=24h\" | grep -q \"\\\"range\\\": \\\"24h\\\"\"'"
 t "leak-test API validates input"        "api /api/leak/dns '{\"token\":\"x;y\"}' | grep -q 'bad token'"
+t "Tor restart needs the CSRF header"    "x 'curl -s -X POST http://127.0.0.1:8080/api/tor/restart | grep -q \"bad request\"'"
+t "Tor restart works and Tor comes back" "api /api/tor/restart '{}' | grep -q '\"ok\": true' && waitfor \"x 'pgrep -x tor'\" 30"
 t "traceroute rejects shell tricks"      "x 'curl -s \"http://127.0.0.1:8080/api/trace?target=1.1.1.1;id\" | grep -q invalid'"
 t "live stream sends data"               "x 'timeout 4 curl -sN http://127.0.0.1:8080/api/stream | grep -q ^data:'"
 
