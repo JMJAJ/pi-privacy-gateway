@@ -220,7 +220,7 @@ This project is for the opposite direction: making your devices' traffic *leave*
 | **Cloudflare (WARP)** | your home IP, volume; in WARP mode also the sites you visit | page content (HTTPS); in provider/Tor mode, the final destinations |
 | **VPN provider** | the sites you visit, the WARP exit IP | your home IP |
 | **Everyone on your Wi-Fi** | your devices' MAC addresses, their DHCP host names, Wi-Fi names a device probes for | anything inside the tunnel. The gateway dashboard hides SSID, BSSID, MACs, router address and listening ports from non-VPN viewers |
-| **Services run by the gateway host itself** | apt, NTP, WARP registration and push alerts use the normal connection, so `ntfy.sh` sees your real IP | - |
+| **Services run by the gateway host itself** | the host's own traffic (updates, clock sync, push alerts) also leaves through WARP, IPv4 and IPv6; only the dashboard's "real ISP IP" check goes direct, to Cloudflare | - |
 
 Things worth doing on your own devices (they are outside the gateway's reach):
 
