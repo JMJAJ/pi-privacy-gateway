@@ -455,10 +455,19 @@ def tor_control(*cmds):
         f.write((c + "\r\n").encode())
         f.flush()
         lines = []
+        data = False   # inside a "250+key=" block, which ends with a lone "."
         while True:
-            line = f.readline().decode(errors="replace").rstrip("\r\n")
+            line = f.readline().decode(errors="replace")
+            if not line:
+                break
+            line = line.rstrip("\r\n")
             lines.append(line)
-            if len(line) >= 4 and line[:3].isdigit() and line[3] == " ":
+            if data:
+                data = line != "."
+            elif line[:4] == "250+":
+                data = True
+            # circuit lines start with their numeric id ("123 BUILT ..."), so only a reply line ends here
+            elif len(line) >= 4 and line[:3].isdigit() and line[3] == " ":
                 break
         out.append(lines)
     s.close()
