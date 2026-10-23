@@ -45,8 +45,49 @@ _state = {}
 _history = {"t": deque(maxlen=HISTORY_LEN)}
 _speed = {"running": False, "mbps": None, "ts": None, "error": None}
 _mode_lock = threading.Lock()
+EXIT_FILE = f"{CFG}/tor-exit"
 _tor_lock = threading.Lock()
 _tor_last = [0.0]
+
+
+# Tor builds 3-relay circuits itself; the only safe knob is narrowing the exit's country (a smaller
+# pool of exits means a bit less anonymity), so it is opt-in and the list is short and fixed.
+TOR_COUNTRIES = {"at": "Austria", "ca": "Canada", "ch": "Switzerland", "cz": "Czechia", "de": "Germany", "fi": "Finland",
+                 "fr": "France", "gb": "United Kingdom", "is": "Iceland", "jp": "Japan", "nl": "Netherlands",
+                 "no": "Norway", "pl": "Poland", "ro": "Romania", "se": "Sweden", "us": "United States"}
+
+
+def tor_exit_country():
+    try:
+        c = open(EXIT_FILE).read().strip().lower()
+    except OSError:
+        c = ""
+    return c if c in TOR_COUNTRIES else ""
+
+
+def tor_apply_exit():
+    """Make Tor's ExitNodes match the saved choice (also after Tor restarts: SETCONF is not persistent)."""
+    try:
+        want = tor_exit_country()
+        res = tor_control("GETCONF ExitNodes")
+        cur = (res[0][0][4:].split("=", 1) + [""])[1].strip("{} ").lower() if res and res[0] else ""
+        if cur == want:
+            return True
+        if want:
+            tor_control("SETCONF ExitNodes={%s} StrictNodes=1" % want)
+        else:
+            tor_control("RESETCONF ExitNodes StrictNodes")
+        tor_control("SIGNAL NEWNYM")
+        return True
+    except (OSError, ValueError, IndexError):
+        return False
+
+
+def _apply_exit_when_ready():
+    for _ in range(30):
+        time.sleep(2)
+        if tor_apply_exit():
+            return
 
 
 def tor_restart():
@@ -58,6 +99,8 @@ def tor_restart():
             return False, "wait"
         _tor_last[0] = time.time()
         r = subprocess.run(["pkill", "-TERM", "-x", "tor"], capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            threading.Thread(target=_apply_exit_when_ready, daemon=True).start()
         return r.returncode == 0, "Tor is not running" if r.returncode else ""
     except (OSError, subprocess.SubprocessError) as e:
         return False, str(e)[:200]
@@ -928,6 +971,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(200, {"client": self.client_address[0], **expected_exit(self.client_address[0])})
         elif path == "/api/status":
             self.send(200, snapshot(self.trusted()))
+        elif path == "/api/tor/exit":
+            if not self.trusted():
+                self.send(403, {"error": "connect through the VPN to do this"})
+                return
+            self.send(200, {"country": tor_exit_country(), "options": TOR_COUNTRIES})
         elif path == "/api/mode":  # cheap, for tray apps
             self.send(200, {"mode": quick_mode(), "kill_switch": (get("killswitch") or {}).get("armed", False),
                             "can_control": self.trusted(), "provider": PROVIDER_NAME if os.path.exists(f"{WG_DIR}/wg2.conf") else None})
@@ -995,6 +1043,26 @@ class Handler(BaseHTTPRequestHandler):
                 return
             ok, msg = tor_restart()
             self.send(200 if ok else 429 if msg == "wait" else 500, {"ok": ok, "error": None if ok else msg})
+        elif path == "/api/tor/newcircuit":
+            if self.guarded_post() is None:
+                return
+            try:
+                ok = tor_control("SIGNAL NEWNYM")[0][0].startswith("250")
+            except (OSError, IndexError):
+                ok = False
+            self.send(200 if ok else 500, {"ok": ok, "error": None if ok else "Tor is not reachable"})
+        elif path == "/api/tor/exit":
+            body = self.guarded_post()
+            if body is None:
+                return
+            c = str(body.get("country") or "").lower()
+            if c and c not in TOR_COUNTRIES:
+                self.send(400, {"error": "unknown country"})
+                return
+            with open(EXIT_FILE, "w") as f:
+                f.write(c)
+            ok = tor_apply_exit()
+            self.send(200 if ok else 500, {"ok": ok, "country": c, "error": None if ok else "Tor is not reachable (saved, will apply when it is)"})
         elif path == "/api/leak/dns":
             body = self.guarded_post()
             if body is None:
@@ -1015,6 +1083,7 @@ if __name__ == "__main__":
     loop(5, components, 60)
     loop(10, latency, 600)
     loop(30, slow, 300)
+    loop(60, tor_apply_exit)       # keeps the chosen exit country applied (also after Tor restarts)
     loop(60, history_sample)       # one row per minute, kept 30 days
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     srv.daemon_threads = True
