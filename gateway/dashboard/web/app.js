@@ -448,7 +448,7 @@ function renderRoute(mode, ex, w, pv, T, hasProv) {
   const mx = Math.max(1, ...items.map((i) => i[1] || 0));
   $('latency').innerHTML = items.map(([k, v], i) =>
     `<div class="lat-row"><span>${esc(k)}</span><div class="hbar ${i === items.length - 1 ? 'tor' : ''}"><div style="width:${v ? Math.max(2, (100 * v) / mx) : 0}%"></div></div><span class="n">${v == null ? '—' : num(v, v < 10 ? 1 : 0) + ' ms'}</span></div>`).join('');
-  if ($('tor-restart')) $('tor-restart').hidden = !S.trusted;
+  for (const id of ['tor-restart', 'tor-newnym', 'tor-country']) if ($(id)) $(id).hidden = !S.trusted;
   $('tor-hint').textContent = tor ? 'Your VPN traffic currently flows through this circuit' : 'Not carrying your traffic right now';
   const path = T.path || [];
   $('tor-circuit').innerHTML = (path.length ? '<div class="flow">' + ['<div class="hopbox"><div class="r">You</div><div class="nm">Gateway</div><div class="mono muted">via WARP</div></div>']
@@ -504,6 +504,41 @@ if ($('tor-restart')) {
     b.textContent = msg;
     setTimeout(() => { b.disabled = false; b.textContent = label; }, 15000);
   });
+}
+
+// New circuit (fresh paths for new connections) and an optional exit country
+const torPost = async (url, body) => {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Pi-Control': '1' }, body: JSON.stringify(body || {}) });
+  return { ok: r.ok, j: await r.json().catch(() => ({})) };
+};
+if ($('tor-newnym')) {
+  $('tor-newnym').addEventListener('click', async () => {
+    const b = $('tor-newnym'); b.disabled = true; b.textContent = 'Requesting...';
+    let m = 'Failed';
+    try { const { ok, j } = await torPost('/api/tor/newcircuit'); m = ok ? 'Done - new connections use new circuits' : (j.error || 'Failed'); } catch (_) { /* keep Failed */ }
+    b.textContent = m;
+    setTimeout(() => { b.disabled = false; b.textContent = 'New circuit'; }, 8000);
+  });
+}
+async function loadTorExit() {
+  const sel = $('tor-country');
+  if (!sel) return;
+  try {
+    const r = await fetch('/api/tor/exit');
+    if (!r.ok) return;
+    const j = await r.json();
+    sel.innerHTML = '<option value="">Exit: any country (recommended)</option>' +
+      Object.entries(j.options).map(([c, n]) => `<option value="${esc(c)}">${esc(n)}</option>`).join('');
+    sel.value = j.country || '';
+  } catch (_) { /* leave empty */ }
+}
+if ($('tor-country')) {
+  $('tor-country').addEventListener('change', async () => {
+    const sel = $('tor-country'); sel.disabled = true;
+    try { await torPost('/api/tor/exit', { country: sel.value }); } catch (_) { /* reloaded below */ }
+    sel.disabled = false; loadTorExit();
+  });
+  loadTorExit();
 }
 
 function renderSystem(sys, pw) {
