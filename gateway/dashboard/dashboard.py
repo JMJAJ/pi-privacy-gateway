@@ -421,7 +421,7 @@ def ping_ms(host, mark=None, iface=None, count=3):
 def latency():
     _, gw = default_route()
     warp_ep = ((get("wg0") or {}).get("peers") or [{}])[0].get("endpoint") or ""
-    tor_out = run(["curl", "-s", "-o", "/dev/null", "-w", "%{time_connect}", "--max-time", "10",
+    tor_out = run(["curl", "-s", "-o", "/dev/null", "-w", "%{time_appconnect}", "--max-time", "10",
                    "--socks5-hostname", "127.0.0.1:9050", "https://1.1.1.1/"], timeout=12)
     try:
         tor_ms = round(float(tor_out) * 1000, 1) or None
