@@ -5,6 +5,8 @@
 set -euo pipefail
 exec >>/var/log/pgw-firstboot.log 2>&1
 echo "=== $(date) attempt"
+# make sure the Pi can resolve its own name (otherwise every sudo prints a warning)
+grep -qw "$(hostname)" /etc/hosts || echo "127.0.1.1 $(hostname)" >> /etc/hosts
 DIR=/opt/pi-privacy-gateway
 for _ in $(seq 1 60); do curl -fsS -m 10 -o /dev/null https://github.com && break; echo "waiting for the internet..."; sleep 10; done
 export DEBIAN_FRONTEND=noninteractive

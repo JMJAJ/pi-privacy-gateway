@@ -3,6 +3,7 @@
 # setup screen. With the setup screen (recommended: your own user, password, Wi-Fi and SSH key), Imager
 # replaces this file - that's fine, the gateway installer is part of the image itself.
 hostname: pi-privacy-gateway
+manage_etc_hosts: true
 # Login: ubuntu / ubuntu, a new password is required at first login (same as Ubuntu's own image).
 # SSH with password is on so you can log in from another computer.
 ssh_pwauth: true
