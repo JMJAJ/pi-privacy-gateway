@@ -298,12 +298,16 @@ function render() {
   $('host').textContent = location.host;
   $('mode-provider').hidden = !hasProv;
   $('mode-provider').textContent = S.provider_name || 'Provider';
-  for (const m of ['warp', 'provider', 'tor']) {
+  $('mode-ptor').hidden = !hasProv;
+  $('mode-ptor').textContent = (S.provider_name || 'Provider') + '+Tor';
+  // "Provider+Tor" = Tor mode with Tor itself running through the provider tunnel
+  const cur = tor && S.tor_via === 'provider' ? 'ptor' : mode;
+  for (const m of ['warp', 'provider', 'tor', 'ptor']) {
     const b = $('mode-' + m);
-    b.classList.toggle('on', mode === m);
-    b.setAttribute('aria-checked', mode === m);
+    b.classList.toggle('on', cur === m);
+    b.setAttribute('aria-checked', cur === m);
     b.disabled = !trusted || switching;
-    b.title = trusted ? `Send all VPN devices out through ${modeName(m)}` : 'Connect through the VPN to switch';
+    b.title = trusted ? (m === 'ptor' ? `Tor, with Tor itself connecting through ${S.provider_name || 'the provider'} (inside WARP)` : `Send all VPN devices out through ${modeName(m)}`) : 'Connect through the VPN to switch';
   }
 
   const alerts = [];
@@ -745,7 +749,8 @@ async function runLeakTest() {
     return { ok, detail: `websites see <b class="mono">${esc(t.ip)}</b> (${esc(modeName(exp.mode))}${exp.mode === 'tor' ? ', varies per site' : ''})${t.ip === ispIp ? ' = your REAL IP' : ''}` };
   });
   await step('IPv6 can’t bypass the VPN', async () => {
-    try { const t = await traceVia('https://[2606:4700:4700::1111]/cdn-cgi/trace'); return { ok: false, detail: `reached the internet over IPv6 as <b class="mono">${esc(t.ip)}</b>` }; }
+    // ipv6.icanhazip.com has only an IPv6 address: if it answers, IPv6 got out (a literal IPv6 URL can't be allowed in CSP)
+    try { const ip = (await withTimeout(fetch('https://ipv6.icanhazip.com/', { cache: 'no-store' }).then((r) => r.text()), 6000)).trim(); return { ok: false, detail: `reached the internet over IPv6 as <b class="mono">${esc(ip)}</b>` }; }
     catch (_) { return { ok: true, detail: 'IPv6 is blocked' }; }
   });
   await step('DNS goes through the gateway (no DNS leak)', async () => {
@@ -800,7 +805,23 @@ async function loadHistory() {
 
 /* ------------------------------------------------------------- exit mode */
 async function setMode(mode) {
-  if (!trusted || switching || (S && S.mode === mode)) return;
+  const curMode = S && S.mode === 'tor' && S.tor_via === 'provider' ? 'ptor' : S && S.mode;
+  if (!trusted || switching || curMode === mode) return;
+  if (mode === 'tor' || mode === 'ptor') {   // first decide how Tor itself reaches the internet
+    const want = mode === 'ptor' ? 'provider' : 'warp';
+    if ((S.tor_via || 'warp') !== want) {
+      switching = true; render();
+      const bn = $('banner'); bn.hidden = false; bn.className = 'banner';
+      bn.innerHTML = chip('tor', 'Switching') + (want === 'provider' ? ` Moving Tor inside ${esc(S.provider_name || 'the provider')} (up to 90 s, reverts automatically if it fails)…` : ' Moving Tor back to WARP…');
+      try {
+        const v = await postJSON('/api/tor/via', { via: want });
+        S.tor_via = v.via;
+      } catch (e) { bn.innerHTML = chip('crit', 'Failed') + ' ' + esc(e.message); switching = false; render(); return; }
+      switching = false;
+      if (S.mode === 'tor') { bn.innerHTML = chip('good', 'Done') + ` Exit is now ${mode === 'ptor' ? esc(S.provider_name || 'Provider') + '+Tor' : 'Tor'}.`; render(); setTimeout(() => { bn.hidden = true; }, 6000); return; }
+    }
+    mode = 'tor';
+  }
   switching = true; render();
   const bn = $('banner');
   bn.hidden = false; bn.className = 'banner';
@@ -816,6 +837,7 @@ async function setMode(mode) {
 $('mode-warp').onclick = () => setMode('warp');
 $('mode-tor').onclick = () => setMode('tor');
 $('mode-provider').onclick = () => setMode('provider');
+$('mode-ptor').onclick = () => setMode('ptor');
 
 /* ------------------------------------------------------------ traceroute */
 // "EXAMPLE-NET - Example Telecom, US" -> "Example Telecom"

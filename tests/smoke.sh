@@ -66,6 +66,9 @@ t "failover moves it to WARP (provider down)" "waitfor \"x 'test -f /run/pgw/fai
 x 'pgw device phone default; pgw device laptop default' >/dev/null 2>&1
 t "overrides cleared"                    "x '! test -s /config/device-modes'"
 t "remove-peer revokes it"               "x 'pgw remove-peer laptop && ! wg show wg1 allowed-ips | grep -q 10.13.13.3'"
+echo "provider+tor"
+x 'timeout 170 pgw-exit tor-via provider' >/dev/null 2>&1   # offline: Tor can't connect -> must revert
+t "provider+tor reverts when Tor can't connect" "x '[ \"\$(pgw-exit tor-via status)\" = warp ] && ! ip rule | grep -q \"^92:\"'"
 echo "default exit modes"
 x 'timeout 15 pgw-exit set tor' >/dev/null 2>&1   # offline: Tor can't connect
 t "tor mode fails CLOSED when offline"   "x 'iptables -S PIX_FWD | grep -q \"\\-i wg1 -j REJECT\" && ! iptables -S PIX_FWD | grep -q \"^-A PIX_FWD -i wg1 -o wg0 -j ACCEPT\"'"
