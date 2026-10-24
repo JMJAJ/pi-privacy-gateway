@@ -70,11 +70,13 @@ Tested on a Raspberry Pi 4 (arm64, Ubuntu 25.10); CI builds and tests on x86-64 
    installer for your computer: `install-windows.cmd`, `install-mac.command` or `install-linux.sh`. It opens the
    official Raspberry Pi Imager (installing it if needed) with **Pi Privacy Gateway** in its OS list.
 2. In Imager: *Choose Device* (Pi 4 or 5) → *Choose OS* → **Pi Privacy Gateway** → *Choose Storage* (your SD card,
-   double-check it) → *Next* → answer **No** to OS customisation (it would replace the first-boot setup).
-   Imager downloads the image and verifies its checksum while writing. For Wi-Fi instead of a cable, edit
-   `network-config` on the card's boot partition afterwards.
+   double-check it) → **customisation**: your username and password, your Wi-Fi name, password **and country**
+   (the Pi's built-in Wi-Fi often only sees 2.4 GHz networks), and *Enable SSH*. Imager downloads the image,
+   verifies its checksum and writes your settings.
 3. Power on and wait about 15 minutes: the Pi installs everything on first boot.
-4. Log in as `ubuntu` / `ubuntu`, on the Pi or over SSH (`ssh ubuntu@<the Pi's IP>`); you must pick a new password. Then add your first device:
+4. Log in with the user you set (skipped the setup screen? `ubuntu` / `ubuntu`, then you must pick a new password),
+   on the Pi or over SSH (`ssh <user>@<the Pi's IP>`). The install keeps retrying until the Pi is online; progress is in
+   `/var/log/pgw-firstboot.log`. Then add your first device:
    `cd /opt/pi-privacy-gateway && sudo docker compose exec gateway pgw add-peer phone`.
    Progress and errors: `/var/log/pgw-firstboot.log`. The AdGuard login is in `/opt/pi-privacy-gateway/.env`.
 

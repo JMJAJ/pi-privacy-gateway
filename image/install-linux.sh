@@ -1,6 +1,6 @@
 #!/bin/bash
 # Pi Privacy Gateway - one-click SD card installer for Linux.
-# Opens Raspberry Pi Imager with "Pi Privacy Gateway" in its OS list. Answer NO to OS customisation.
+# Opens Raspberry Pi Imager with "Pi Privacy Gateway" in its OS list. Use the customisation screen: your user, password, Wi-Fi (+ country), SSH on.
 REPO=https://github.com/JMJAJ/pi-privacy-gateway/releases/latest/download/os_list.json
 if ! command -v rpi-imager >/dev/null; then
   if command -v apt-get >/dev/null; then sudo apt-get install -y rpi-imager

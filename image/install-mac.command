@@ -1,6 +1,6 @@
 #!/bin/bash
 # Pi Privacy Gateway - one-click SD card installer for macOS (double-click it in Finder).
-# Opens Raspberry Pi Imager with "Pi Privacy Gateway" in its OS list. Answer NO to OS customisation.
+# Opens Raspberry Pi Imager with "Pi Privacy Gateway" in its OS list. Use the customisation screen: your user, password, Wi-Fi (+ country), SSH on.
 REPO=https://github.com/JMJAJ/pi-privacy-gateway/releases/latest/download/os_list.json
 APP="/Applications/Raspberry Pi Imager.app"
 if [ ! -d "$APP" ]; then

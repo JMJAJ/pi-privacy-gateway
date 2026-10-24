@@ -2,7 +2,7 @@
 rem Pi Privacy Gateway - one-click SD card installer for Windows.
 rem Opens Raspberry Pi Imager (installs it with winget if missing) with "Pi Privacy Gateway" in its menu.
 rem Then: Choose Device (Pi 4/5) - Choose OS: Pi Privacy Gateway - Choose Storage: your SD card - Next.
-rem When Imager asks about OS customisation, answer NO: the image sets itself up on first boot.
+rem When Imager offers OS customisation, say YES: set your user, password, Wi-Fi (+ country) and SSH.
 setlocal
 set "REPO=https://github.com/JMJAJ/pi-privacy-gateway/releases/latest/download/os_list.json"
 set "IMAGER="
@@ -18,4 +18,5 @@ if not defined IMAGER (
 )
 echo Opening Raspberry Pi Imager with Pi Privacy Gateway in its OS list...
 echo In "Choose OS" pick "Pi Privacy Gateway". Double-check you pick your SD CARD under "Choose Storage".
+echo Then use the customisation screen: your user, password, Wi-Fi and its country, SSH on.
 start "" "%IMAGER%" --repo "%REPO%"

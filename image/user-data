@@ -1,12 +1,10 @@
 #cloud-config
-# Pi Privacy Gateway - first boot. Flash the image, (optionally) put your Wi-Fi in network-config,
-# power on and wait ~15 minutes. Then log in as ubuntu / ubuntu (you must choose a new password)
-# and run:  sudo cat /opt/pi-privacy-gateway/.env   for the AdGuard login.
-# Don't use Raspberry Pi Imager's "OS customisation" with this image: it replaces this file.
+# Pi Privacy Gateway - default first-boot settings, used when you flash WITHOUT Raspberry Pi Imager's
+# setup screen. With the setup screen (recommended: your own user, password, Wi-Fi and SSH key), Imager
+# replaces this file - that's fine, the gateway installer is part of the image itself.
 hostname: pi-privacy-gateway
-# Login: ubuntu / ubuntu, a new password is required at first login (same as Ubuntu's own image, whose
-# first-boot file this one replaces). SSH with password is on so you can log in from another computer.
-# Prefer keys? Put yours under ssh_authorized_keys below before the first boot.
+# Login: ubuntu / ubuntu, a new password is required at first login (same as Ubuntu's own image).
+# SSH with password is on so you can log in from another computer.
 ssh_pwauth: true
 chpasswd:
   expire: true
@@ -14,16 +12,6 @@ chpasswd:
     - name: ubuntu
       password: ubuntu
       type: text
-# ssh_authorized_keys:
-#   - ssh-ed25519 AAAA... you@your-computer
-package_update: true
-package_upgrade: true
-packages:
-  - docker.io
-  - docker-compose-v2
-  - git
-  - curl
-  - qrencode
-runcmd:
-  - [sh, -c, 'exec >>/var/log/pgw-firstboot.log 2>&1; set -x; git clone --depth 1 https://github.com/JMJAJ/pi-privacy-gateway.git /opt/pi-privacy-gateway && cd /opt/pi-privacy-gateway && ./scripts/setup.sh --yes && docker compose up -d --build && echo PGW_FIRSTBOOT_DONE']
-final_message: "Pi Privacy Gateway first boot finished after $UPTIME s - see /var/log/pgw-firstboot.log"
+# The gateway installs itself in the background after the first boot (pgw-firstboot.service: waits for the
+# internet and retries every minute until done, ~15-20 min). Progress: /var/log/pgw-firstboot.log
+final_message: "Pi Privacy Gateway: the install continues in the background - see /var/log/pgw-firstboot.log"

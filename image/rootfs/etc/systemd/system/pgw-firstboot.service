@@ -1,0 +1,14 @@
+[Unit]
+Description=Pi Privacy Gateway first-boot install (retries until done)
+Wants=network-online.target
+After=network-online.target cloud-init.target
+ConditionPathExists=!/var/lib/pgw-installed
+StartLimitIntervalSec=0
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pgw-firstboot
+Restart=on-failure
+RestartSec=60
+TimeoutStartSec=3600
+[Install]
+WantedBy=multi-user.target

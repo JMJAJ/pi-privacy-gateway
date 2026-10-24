@@ -26,12 +26,15 @@ jobs:
           assert u.get('ssh_pwauth') is True, 'ssh_pwauth must be true'
           users = {x['name']: x for x in u['chpasswd']['users']}
           assert 'ubuntu' in users and u['chpasswd'].get('expire') is True, 'ubuntu needs a password that must be changed'
-          print('first-boot files OK: SSH + login ubuntu/ubuntu (forced change)')
+          import os
+          for f in ('image/rootfs/usr/local/sbin/pgw-firstboot', 'image/rootfs/etc/systemd/system/pgw-firstboot.service'):
+              assert os.path.getsize(f) > 100, f
+          print('first-boot files OK: SSH + login ubuntu/ubuntu (forced change), installer in rootfs')
           CHECK
       - name: build
         run: bash image/build.sh "${GITHUB_REF_NAME//\//-}"
       - name: check the Imager list file
-        run: python3 -c "import json;o=json.load(open('image/os_list.json'))['os_list'][0];assert o['extract_size']>10**9 and len(o['image_download_sha256'])==64;print(o['name'], o['url'])"
+        run: python3 -c "import json;o=json.load(open('image/os_list.json'))['os_list'][0];assert o['extract_size']>10**9 and len(o['image_download_sha256'])==64;assert o['init_format']=='cloudinit';print(o['name'], o['url'])"
       - name: attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         env:

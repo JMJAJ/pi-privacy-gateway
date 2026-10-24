@@ -1,0 +1,19 @@
+#!/bin/bash
+# Installs Pi Privacy Gateway once; systemd (pgw-firstboot.service) retries this until it succeeds.
+# Part of the image's system, so it works whether or not Raspberry Pi Imager's setup screen
+# (user, password, Wi-Fi) replaced the card's first-boot file.
+set -euo pipefail
+exec >>/var/log/pgw-firstboot.log 2>&1
+echo "=== $(date) attempt"
+DIR=/opt/pi-privacy-gateway
+for _ in $(seq 1 60); do curl -fsS -m 10 -o /dev/null https://github.com && break; echo "waiting for the internet..."; sleep 10; done
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -q
+apt-get install -y -q docker.io docker-compose-v2 git curl qrencode
+if [ -d "$DIR/.git" ]; then git -C "$DIR" pull --ff-only
+else rm -rf "$DIR"; git clone --depth 1 https://github.com/JMJAJ/pi-privacy-gateway.git "$DIR"; fi
+cd "$DIR"
+./scripts/setup.sh --yes
+docker compose up -d --build
+touch /var/lib/pgw-installed
+echo "PGW_FIRSTBOOT_DONE $(date)"
