@@ -6,11 +6,11 @@ rem When Imager asks about OS customisation, answer NO: the image sets itself up
 setlocal
 set "REPO=https://github.com/JMJAJ/pi-privacy-gateway/releases/latest/download/os_list.json"
 set "IMAGER="
-for %%P in ("%ProgramFiles%\Raspberry Pi Imager\rpi-imager.exe" "%ProgramFiles(x86)%\Raspberry Pi Imager\rpi-imager.exe" "%LocalAppData%\Programs\Raspberry Pi Imager\rpi-imager.exe") do if exist %%P set "IMAGER=%%~P"
+for %%P in ("%ProgramFiles%\Raspberry Pi Ltd\Imager\rpi-imager.exe" "%ProgramFiles%\Raspberry Pi Imager\rpi-imager.exe" "%ProgramFiles(x86)%\Raspberry Pi Imager\rpi-imager.exe" "%LocalAppData%\Programs\Raspberry Pi Imager\rpi-imager.exe") do if exist %%P set "IMAGER=%%~P"
 if not defined IMAGER (
   echo Raspberry Pi Imager is not installed - installing the official version with winget...
   winget install -e --id RaspberryPiFoundation.RaspberryPiImager --accept-source-agreements --accept-package-agreements
-  for %%P in ("%ProgramFiles%\Raspberry Pi Imager\rpi-imager.exe" "%ProgramFiles(x86)%\Raspberry Pi Imager\rpi-imager.exe" "%LocalAppData%\Programs\Raspberry Pi Imager\rpi-imager.exe") do if exist %%P set "IMAGER=%%~P"
+  for %%P in ("%ProgramFiles%\Raspberry Pi Ltd\Imager\rpi-imager.exe" "%ProgramFiles%\Raspberry Pi Imager\rpi-imager.exe" "%ProgramFiles(x86)%\Raspberry Pi Imager\rpi-imager.exe" "%LocalAppData%\Programs\Raspberry Pi Imager\rpi-imager.exe") do if exist %%P set "IMAGER=%%~P"
 )
 if not defined IMAGER (
   echo Could not find Raspberry Pi Imager. Install it from https://www.raspberrypi.com/software/ and run this again.
