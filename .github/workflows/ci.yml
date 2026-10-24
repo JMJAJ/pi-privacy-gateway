@@ -11,7 +11,7 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: shellcheck
         run: shellcheck -S warning gateway/bin/* scripts/*.sh scripts/pgw-clockfix image/build.sh tests/*.sh extras/host/pi-ip-failover
       - name: python
@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: lint
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: load WireGuard on the host (the container is unprivileged, like in production)
         run: sudo modprobe wireguard
       - name: smoke test (unprivileged, isolated network namespace, offline WARP stand-in)
@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: lint
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - name: build for Raspberry Pi (arm64)
@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: lint
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: pre-configured AdGuard Home starts and accepts the login (no wizard)
         run: |
           bash scripts/adguard-seed.sh admin 'test-Pa55word' "$PWD/ag/conf"
@@ -61,7 +61,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: lint
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: first boot (image/user-data runcmd)
         run: |
           sudo apt-get install -y -q git curl qrencode python3-yaml >/dev/null
