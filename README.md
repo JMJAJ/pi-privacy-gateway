@@ -66,9 +66,13 @@ Tested on a Raspberry Pi 4 (arm64, Ubuntu 25.10); CI builds and tests on x86-64 
 
 ## Easiest: the ready-made SD card image (Raspberry Pi 4/5)
 
-1. Download `pi-privacy-gateway-<version>-raspi-arm64.img.xz` from the [latest release](https://github.com/JMJAJ/pi-privacy-gateway/releases/latest).
-2. Flash it with Raspberry Pi Imager (*Choose OS → Use custom*). Skip Imager's *OS customisation*: it would
-   replace the first-boot setup. For Wi-Fi instead of a cable, edit `network-config` on the card's boot partition.
+1. From the [latest release](https://github.com/JMJAJ/pi-privacy-gateway/releases/latest), download and run the
+   installer for your computer: `install-windows.cmd`, `install-mac.command` or `install-linux.sh`. It opens the
+   official Raspberry Pi Imager (installing it if needed) with **Pi Privacy Gateway** in its OS list.
+2. In Imager: *Choose Device* (Pi 4 or 5) → *Choose OS* → **Pi Privacy Gateway** → *Choose Storage* (your SD card,
+   double-check it) → *Next* → answer **No** to OS customisation (it would replace the first-boot setup).
+   Imager downloads the image and verifies its checksum while writing. For Wi-Fi instead of a cable, edit
+   `network-config` on the card's boot partition afterwards.
 3. Power on and wait about 15 minutes: the Pi installs everything on first boot.
 4. Log in as `ubuntu` / `ubuntu` (you must pick a new password), then add your first device:
    `cd /opt/pi-privacy-gateway && sudo docker compose exec gateway pgw add-peer phone`.

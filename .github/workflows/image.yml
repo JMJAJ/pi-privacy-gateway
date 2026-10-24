@@ -21,16 +21,20 @@ jobs:
         run: python3 -c "import yaml;[yaml.safe_load(open(f)) for f in ('image/user-data','image/network-config')]"
       - name: build
         run: bash image/build.sh "${GITHUB_REF_NAME//\//-}"
+      - name: check the Imager list file
+        run: python3 -c "import json;o=json.load(open('image/os_list.json'))['os_list'][0];assert o['extract_size']>10**9 and len(o['image_download_sha256'])==64;print(o['name'], o['url'])"
       - name: attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --generate-notes
-          gh release upload "$GITHUB_REF_NAME" image/pi-privacy-gateway-*.img.xz image/pi-privacy-gateway-*.img.xz.sha256 --clobber
+          gh release upload "$GITHUB_REF_NAME" image/pi-privacy-gateway-*.img.xz image/pi-privacy-gateway-*.img.xz.sha256             image/os_list.json image/install-windows.cmd image/install-mac.command image/install-linux.sh --clobber
       - uses: actions/upload-artifact@v4
         if: "!startsWith(github.ref, 'refs/tags/v')"
         with:
           name: sd-card-image
-          path: image/pi-privacy-gateway-*.img.xz*
+          path: |
+            image/pi-privacy-gateway-*.img.xz*
+            image/os_list.json
           retention-days: 7

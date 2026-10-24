@@ -21,6 +21,24 @@ for f in user-data network-config; do mcopy -o -i "base.img@@$OFF" "$f" "::$f"; 
 mdir -i "base.img@@$OFF" ::user-data ::network-config
 OUT="pi-privacy-gateway-$VERSION-raspi-arm64.img"
 mv base.img "$OUT"
+EXTRACT_SIZE=$(stat -c %s "$OUT"); EXTRACT_SHA=$(sha256sum "$OUT" | cut -d' ' -f1)
 xz -T0 -6 "$OUT"
 sha256sum "$OUT.xz" > "$OUT.xz.sha256"
-ls -lh "$OUT.xz"
+DL_SIZE=$(stat -c %s "$OUT.xz"); DL_SHA=$(cut -d' ' -f1 "$OUT.xz.sha256")
+# Raspberry Pi Imager reads this list (its --repo option): our image appears in its menu, with sizes and
+# checksums Imager verifies while writing. No init_format: Imager's OS customisation would replace
+# our first-boot setup, so it is not offered.
+python3 - "$VERSION" "$OUT.xz" "$EXTRACT_SIZE" "$EXTRACT_SHA" "$DL_SIZE" "$DL_SHA" > os_list.json <<'PYJSON'
+import json, sys, datetime
+ver, name, xs, xsha, ds, dsha = sys.argv[1:]
+print(json.dumps({"os_list": [{
+    "name": "Pi Privacy Gateway",
+    "description": "Private home gateway: WARP / VPN provider / Tor exits, kill switch, ad blocking, dashboard. Installs itself on first boot (~15 min).",
+    "url": f"https://github.com/JMJAJ/pi-privacy-gateway/releases/download/{ver}/{name}",
+    "extract_size": int(xs), "extract_sha256": xsha,
+    "image_download_size": int(ds), "image_download_sha256": dsha,
+    "release_date": datetime.date.today().isoformat(),
+    "devices": ["pi4-64bit", "pi5-64bit"],
+}]}, indent=2))
+PYJSON
+ls -lh "$OUT.xz" os_list.json
