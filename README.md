@@ -64,7 +64,20 @@ flowchart LR
 
 Tested on a Raspberry Pi 4 (arm64, Ubuntu 25.10); CI builds and tests on x86-64 and arm64.
 
-## Quick start
+## Easiest: the ready-made SD card image (Raspberry Pi 4/5)
+
+1. Download `pi-privacy-gateway-<version>-raspi-arm64.img.xz` from the [latest release](https://github.com/JMJAJ/pi-privacy-gateway/releases/latest).
+2. Flash it with Raspberry Pi Imager (*Choose OS → Use custom*). Skip Imager's *OS customisation*: it would
+   replace the first-boot setup. For Wi-Fi instead of a cable, edit `network-config` on the card's boot partition.
+3. Power on and wait about 15 minutes: the Pi installs everything on first boot.
+4. Log in as `ubuntu` / `ubuntu` (you must pick a new password), then add your first device:
+   `cd /opt/pi-privacy-gateway && sudo docker compose exec gateway pgw add-peer phone`.
+   Progress and errors: `/var/log/pgw-firstboot.log`. The AdGuard login is in `/opt/pi-privacy-gateway/.env`.
+
+The image is the official Ubuntu Server 24.04 LTS image (checksum-verified) plus two first-boot files
+([image/](image)); [image/build.sh](image/build.sh) rebuilds it.
+
+## Quick start (any Linux host)
 
 ```bash
 git clone https://github.com/JMJAJ/pi-privacy-gateway.git
@@ -73,9 +86,8 @@ sudo ./scripts/setup.sh          # checks the host, creates .env
 sudo docker compose up -d --build
 ```
 
-1. Open `http://<gateway-ip>:3000` and finish AdGuard's setup wizard (keep the admin interface on port **3000**
-   and DNS on port **53**). Use the login from `.env` (`ADGUARD_USER` / `ADGUARD_PASSWORD`), or put the one you
-   chose into `.env` and run `docker compose up -d` again.
+1. AdGuard Home comes pre-configured with the login from `.env` (`ADGUARD_USER` / `ADGUARD_PASSWORD`), admin
+   interface on port 3000. (An existing AdGuard config is left alone.)
 2. Add a device and scan the QR code with the WireGuard app:
    ```bash
    sudo docker compose exec gateway pgw add-peer phone
@@ -139,9 +151,30 @@ The provider tunnel runs inside WARP automatically (its MTU is adjusted to fit).
 
 ## Using it away from home
 
+**Behind CGNAT** (many mobile and fibre ISPs: nothing from outside can reach your home) — use Tailscale as the
+transport and this gateway as its exit node. Your phone then gets the same exit, kill switch, DNS filtering and
+TTL masking anywhere; Tailscale sees which devices connect, not your traffic:
+
+1. On the host: install [Tailscale](https://tailscale.com/download/linux), then
+   `sudo tailscale up --advertise-exit-node --netfilter-mode=off --accept-dns=false`
+   (`--netfilter-mode=off` leaves the firewall to the gateway's kill switch).
+2. In the Tailscale admin console: the host → *Edit route settings* → tick **Use as exit node**; also *Disable key expiry*.
+3. Set `TAILSCALE_EXIT=on` in `.env` and `docker compose up -d`.
+4. On the phone: the Tailscale app, same account, *Exit node* → your gateway (turn the WireGuard app off:
+   phones run one VPN at a time). The dashboard is at `http://<gateway's Tailscale IP>/dashboard`.
+
+**With a public IP:**
+
 Set `PUBLIC_ENDPOINT` in `.env` to a DynDNS name pointing at your home IP, forward UDP `WG_PORT` (51820)
 on your router to the gateway, then add (or re-add) devices. Only WireGuard is exposed; it does not answer
 anything without a valid key.
+
+## Hiding that you use Tor (Snowflake bridge)
+
+In Tor mode everything before the first Tor relay (your ISP, Cloudflare, your provider in Provider+Tor mode) can
+tell the traffic is Tor. Pick *Bridge: Snowflake* on the dashboard's Tor card (or `pgw-exit tor-bridge snowflake`):
+Tor then connects through Snowflake, which looks like a WebRTC video call to a volunteer proxy. It is slower and
+needs 2–6 minutes to connect; if it can't, the gateway goes back to the normal connection by itself.
 
 ## How the kill switch works
 
@@ -172,6 +205,7 @@ admin-only folder.
 
 | Symptom | Cause / fix |
 |---|---|
+| No internet for a long time after power-on, in Tor mode | A Pi has no battery clock and Tor refuses a wrong time; in Tor mode DNS needs Tor. `setup.sh` adds DNS-free time servers and a boot-time HTTPS clock fix (`pgw-clockfix`). |
 | `wg-quick: Permission denied` reading a config | Ubuntu's AppArmor profile only lets `wg-quick` read `/etc/wireguard`. Configs are kept there for this reason; don't move them. |
 | AdGuard won't start: port 53 in use | systemd-resolved's stub listener. `scripts/setup.sh` can disable it. |
 | Tor mode never connects | The clock is wrong. Check `timedatectl`; see [extras/host](extras/host/README.md). |
@@ -229,6 +263,10 @@ Things worth doing on your own devices (they are outside the gateway's reach):
   `netsh wlan set profileparameter name="<SSID>" randomization=yes`. Your router will hand the device a new address once.
 - **Don't let the PC probe for names.** Windows profiles set to "connect even if not broadcasting" announce that network's name
   everywhere: `netsh wlan set profileparameter name="<SSID>" nonBroadcast=no`.
+- The gateway sets every device's outgoing TTL to 64, so sites can't tell Windows from a phone by it (WARP and
+  provider modes; in Tor mode sites only ever see the exit relay's network stack).
+- In provider mode the gateway resolves through Quad9 and Mullvad (no Cloudflare resolver, since Cloudflare
+  already knows your IP through WARP), over the provider tunnel.
 - **Disable Teredo** (`netsh interface teredo set state disabled`): it tunnels IPv6 around the VPN's routing and encodes your public IPv4 in the address.
 - **Mesh/gaming VPNs** (Tailscale, Radmin, ZeroTier, ...) talk to their peers and coordination servers directly: pause them when you need the IP hidden.
 - **Host name**: a device's DHCP name (often your username) is visible on the LAN; choose a neutral one.

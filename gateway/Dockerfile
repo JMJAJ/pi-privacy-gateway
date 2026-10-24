@@ -8,7 +8,7 @@ ARG WGCF_VERSION=2.3.0
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       wireguard-tools iproute2 iptables iputils-ping iw tor curl ca-certificates \
-      python3 dnsutils qrencode procps supervisor tini \
+      python3 dnsutils qrencode procps supervisor tini snowflake-client \
  && rm -rf /var/lib/apt/lists/*
 
 # wgcf registers a free Cloudflare WARP account and writes a WireGuard profile for it

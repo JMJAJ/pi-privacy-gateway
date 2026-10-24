@@ -27,7 +27,7 @@ printf '[Interface]\nPrivateKey = %s\nAddress = 10.2.0.2/32\n[Peer]\nPublicKey =
 
 docker run -d --name "$C" --cap-add NET_ADMIN --cap-add NET_RAW --security-opt no-new-privileges:true \
   --sysctl net.ipv4.ip_forward=1 --sysctl net.ipv4.conf.all.src_valid_mark=1 \
-  -e PGW_TEST=1 -e DASHBOARD_PORT=8080 -e EXIT_FAILOVER=warp -e PROVIDER_NAME=TestVPN \
+  -e PGW_TEST=1 -e DASHBOARD_PORT=8080 -e EXIT_FAILOVER=warp -e PROVIDER_NAME=TestVPN -e TAILSCALE_EXIT=on \
   -v "$CFGDIR:/config" "$IMG" >/dev/null
 waitfor "x 'ip link show wg1'" 40
 sleep 4
@@ -48,6 +48,9 @@ t "only wg1 -> wg0 allowed in warp mode" "x 'iptables -S PIX_FWD | grep -q \"\\-
 t "IPv6 from devices rejected"           "x 'ip6tables -S PIX_FWD | grep -q \"\\-i wg1 -j REJECT\"'"
 t "WARP rule priorities fixed at 98/99"  "x 'ip rule | grep -q ^98: && ip rule | grep -q ^99:'"
 t "Android DoT probe refused instantly"  "x 'iptables -S PIX_IN | grep -q \"dport 853 -j REJECT\"'"
+t "OS fingerprint masked (TTL 64)"        "x 'iptables -t mangle -S PIX_MANGLE | grep -q \"wg1 -j TTL --ttl-set 64\"'"
+t "Tailscale clients under the kill switch" "x 'iptables -S PIX_FWD | grep -q \"\-i tailscale0 -j REJECT\" && ip rule | grep -q \"^97:.*100.64.0.0/10\"'"
+t "Snowflake bridge available, off by default" "x 'test -x /usr/bin/snowflake-client && [ \"\$(pgw-exit tor-bridge status)\" = off ]'"
 echo "devices (CLI)"
 t "add-peer creates config + QR"         "x 'pgw add-peer phone && test -s /config/peers/phone.conf && test -s /config/peers/phone.png'"
 t "peer is live with a preshared key"    "x 'wg show wg1 preshared-keys | grep -v none | grep -q .'"
@@ -61,6 +64,7 @@ t "phone can't bypass Tor (fail closed)" "x 'iptables -S PIX_FWD | grep -q \"\\-
 t "others still use WARP"                "x 'iptables -S PIX_FWD | grep -q \"^-A PIX_FWD -i wg1 -o wg0 -j ACCEPT\"'"
 x 'timeout 20 pgw device laptop provider' >/dev/null 2>&1
 # (provider is offline here, so failover may already have moved it to WARP: either table is right)
+t "provider DNS rides the provider (or failover is on)" "x 'ip rule | grep -q \"^91:.*9.9.9.9\" || test -f /run/pgw/failover'"
 t "laptop gets its own routing rule"     "x 'grep -q \"10.13.13.3 provider\" /config/device-modes && ip rule | grep -q \"^94:.*from 10.13.13.3 iif wg1\"'"
 t "failover moves it to WARP (provider down)" "waitfor \"x 'test -f /run/pgw/failover && iptables -S PIX_FWD | grep -q \\\"\\-s 10.13.13.3/32 -i wg1 -o wg0 -j ACCEPT\\\"'\" 40"
 x 'pgw device phone default; pgw device laptop default' >/dev/null 2>&1

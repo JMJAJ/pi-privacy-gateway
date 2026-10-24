@@ -1,0 +1,15 @@
+# Wired Ethernet works out of the box. For Wi-Fi, uncomment the wifis block and fill in your network
+# (keep the indentation: two spaces per level).
+network:
+  version: 2
+  ethernets:
+    eth0:
+      dhcp4: true
+      optional: true
+#  wifis:
+#    wlan0:
+#      dhcp4: true
+#      optional: true
+#      access-points:
+#        "YOUR-WIFI-NAME":
+#          password: "your-wifi-password"
