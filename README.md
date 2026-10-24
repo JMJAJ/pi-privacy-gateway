@@ -74,7 +74,7 @@ Tested on a Raspberry Pi 4 (arm64, Ubuntu 25.10); CI builds and tests on x86-64 
    Imager downloads the image and verifies its checksum while writing. For Wi-Fi instead of a cable, edit
    `network-config` on the card's boot partition afterwards.
 3. Power on and wait about 15 minutes: the Pi installs everything on first boot.
-4. Log in as `ubuntu` / `ubuntu` (you must pick a new password), then add your first device:
+4. Log in as `ubuntu` / `ubuntu`, on the Pi or over SSH (`ssh ubuntu@<the Pi's IP>`); you must pick a new password. Then add your first device:
    `cd /opt/pi-privacy-gateway && sudo docker compose exec gateway pgw add-peer phone`.
    Progress and errors: `/var/log/pgw-firstboot.log`. The AdGuard login is in `/opt/pi-privacy-gateway/.env`.
 

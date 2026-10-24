@@ -4,6 +4,18 @@
 # and run:  sudo cat /opt/pi-privacy-gateway/.env   for the AdGuard login.
 # Don't use Raspberry Pi Imager's "OS customisation" with this image: it replaces this file.
 hostname: pi-privacy-gateway
+# Login: ubuntu / ubuntu, a new password is required at first login (same as Ubuntu's own image, whose
+# first-boot file this one replaces). SSH with password is on so you can log in from another computer.
+# Prefer keys? Put yours under ssh_authorized_keys below before the first boot.
+ssh_pwauth: true
+chpasswd:
+  expire: true
+  users:
+    - name: ubuntu
+      password: ubuntu
+      type: text
+# ssh_authorized_keys:
+#   - ssh-ed25519 AAAA... you@your-computer
 package_update: true
 package_upgrade: true
 packages:

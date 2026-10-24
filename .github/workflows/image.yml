@@ -18,7 +18,16 @@ jobs:
       - name: tools
         run: sudo apt-get update -q && sudo apt-get install -y -q mtools xz-utils fdisk python3-yaml
       - name: check first-boot files
-        run: python3 -c "import yaml;[yaml.safe_load(open(f)) for f in ('image/user-data','image/network-config')]"
+        run: |
+          python3 - <<'CHECK'
+          import yaml
+          u = yaml.safe_load(open('image/user-data')); yaml.safe_load(open('image/network-config'))
+          # without these the ubuntu account stays locked (cloud.cfg: lock_passwd) and nobody can log in
+          assert u.get('ssh_pwauth') is True, 'ssh_pwauth must be true'
+          users = {x['name']: x for x in u['chpasswd']['users']}
+          assert 'ubuntu' in users and u['chpasswd'].get('expire') is True, 'ubuntu needs a password that must be changed'
+          print('first-boot files OK: SSH + login ubuntu/ubuntu (forced change)')
+          CHECK
       - name: build
         run: bash image/build.sh "${GITHUB_REF_NAME//\//-}"
       - name: check the Imager list file
