@@ -7,9 +7,15 @@ on:
 permissions:
   contents: read
 
+# a newer commit on the same branch cancels the run for the older one
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - name: shellcheck
@@ -21,6 +27,7 @@ jobs:
 
   smoke:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     needs: lint
     steps:
       - uses: actions/checkout@v7
@@ -31,6 +38,7 @@ jobs:
 
   arm64-build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     needs: lint
     steps:
       - uses: actions/checkout@v7
@@ -41,6 +49,7 @@ jobs:
 
   adguard-seed:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     needs: lint
     steps:
       - uses: actions/checkout@v7
@@ -59,6 +68,7 @@ jobs:
   # Differences from a Pi: x86 instead of arm64, and the runner's preinstalled Docker CE instead of docker.io.
   firstboot:
     runs-on: ubuntu-24.04
+    timeout-minutes: 40
     needs: lint
     steps:
       - uses: actions/checkout@v7
@@ -81,13 +91,13 @@ jobs:
           for i in $(seq 1 60); do [ "$(sudo docker inspect -f '{{.State.Health.Status}}' pgw-gateway 2>/dev/null)" = healthy ] && break; sleep 5; done
           sudo docker ps --format '{{.Names}} {{.Status}}'
           echo "--- gateway healthy";    [ "$(sudo docker inspect -f '{{.State.Health.Status}}' pgw-gateway)" = healthy ]
-          echo "--- WARP connected";     sudo docker exec pgw-gateway curl -s -m 10 --interface wg0 https://1.1.1.1/cdn-cgi/trace | grep -q 'warp=on'
-          echo "--- kill switch armed";  sudo iptables -C FORWARD -j PIX_FWD
-          echo "--- dashboard answers";  curl -sf -m 10 http://127.0.0.1/api/mode | grep -q '"kill_switch": true'
-          echo "--- add a device (QR)";  sudo docker exec pgw-gateway pgw add-peer phone >/dev/null && sudo test -s data/gateway/peers/phone.conf
+          echo "--- WARP connected";     timeout 60 sudo docker exec pgw-gateway curl -s -m 10 --interface wg0 https://1.1.1.1/cdn-cgi/trace | grep -q 'warp=on'
+          echo "--- kill switch armed";  timeout 60 sudo iptables -C FORWARD -j PIX_FWD
+          echo "--- dashboard answers";  timeout 60 curl -sf -m 10 http://127.0.0.1/api/mode | grep -q '"kill_switch": true'
+          echo "--- add a device (QR)";  timeout 60 sudo docker exec pgw-gateway pgw add-peer phone >/dev/null && sudo test -s data/gateway/peers/phone.conf
           set -a; . <(sudo cat .env); set +a
           echo "--- AdGuard pre-configured, login from .env works"
-          curl -sf -m 10 -u "$ADGUARD_USER:$ADGUARD_PASSWORD" http://127.0.0.1:3000/control/status | grep -q '"running":true'
-          echo "--- DNS answers through AdGuard"; dig +short +time=5 @127.0.0.1 example.com | grep -qE '^[0-9.]+$'
-          echo "--- clock fallback installed"; systemctl is-enabled pgw-clockfix.service
+          timeout 60 curl -sf -m 10 -u "$ADGUARD_USER:$ADGUARD_PASSWORD" http://127.0.0.1:3000/control/status | grep -q '"running":true'
+          echo "--- DNS answers through AdGuard"; timeout 60 dig +short +time=5 @127.0.0.1 example.com | grep -qE '^[0-9.]+$'
+          echo "--- clock fallback installed"; timeout 60 systemctl is-enabled pgw-clockfix.service
           echo ALL FIRST-BOOT CHECKS PASSED
