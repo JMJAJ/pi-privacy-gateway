@@ -53,3 +53,37 @@ jobs:
           curl -sf -u admin:test-Pa55word http://127.0.0.1:3000/control/status | python3 -c "import sys,json;d=json.load(sys.stdin);assert d['running'] and d['dns_port']==53, d;print('AdGuard OK, version', d['version'])"
           [ "$(curl -s -o /dev/null -w '%{http_code}' -u admin:wrong http://127.0.0.1:3000/control/status)" = 401 ]
           docker logs ag 2>&1 | tail -5
+
+  # The SD card image's first boot, on a fresh Ubuntu 24.04 machine: the exact runcmd from image/user-data
+  # (with this commit instead of a git clone), then checks that a user would get a working gateway.
+  # Differences from a Pi: x86 instead of arm64, and the runner's preinstalled Docker CE instead of docker.io.
+  firstboot:
+    runs-on: ubuntu-24.04
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - name: first boot (image/user-data runcmd)
+        run: |
+          sudo apt-get install -y -q git curl qrencode python3-yaml >/dev/null
+          cmd=$(python3 -c "import yaml;print(yaml.safe_load(open('image/user-data'))['runcmd'][0][2])")
+          cmd=${cmd//git clone --depth 1 https:\/\/github.com\/JMJAJ\/pi-privacy-gateway.git \/opt\/pi-privacy-gateway/cp -a $GITHUB_WORKSPACE \/opt\/pi-privacy-gateway}
+          echo "$cmd" | grep -q "cp -a" || { echo "could not adapt the runcmd"; exit 1; }
+          sudo sh -c "$cmd" || true
+          sudo cat /var/log/pgw-firstboot.log | tail -40
+          sudo grep -q PGW_FIRSTBOOT_DONE /var/log/pgw-firstboot.log
+      - name: what a new user gets
+        run: |
+          cd /opt/pi-privacy-gateway
+          for i in $(seq 1 60); do [ "$(sudo docker inspect -f '{{.State.Health.Status}}' pgw-gateway 2>/dev/null)" = healthy ] && break; sleep 5; done
+          sudo docker ps --format '{{.Names}} {{.Status}}'
+          echo "--- gateway healthy";    [ "$(sudo docker inspect -f '{{.State.Health.Status}}' pgw-gateway)" = healthy ]
+          echo "--- WARP connected";     sudo docker exec pgw-gateway curl -s -m 10 --interface wg0 https://1.1.1.1/cdn-cgi/trace | grep -q 'warp=on'
+          echo "--- kill switch armed";  sudo iptables -C FORWARD -j PIX_FWD
+          echo "--- dashboard answers";  curl -sf -m 10 http://127.0.0.1/api/mode | grep -q '"kill_switch": true'
+          echo "--- add a device (QR)";  sudo docker exec pgw-gateway pgw add-peer phone >/dev/null && sudo test -s data/gateway/peers/phone.conf
+          set -a; . <(sudo cat .env); set +a
+          echo "--- AdGuard pre-configured, login from .env works"
+          curl -sf -m 10 -u "$ADGUARD_USER:$ADGUARD_PASSWORD" http://127.0.0.1:3000/control/status | grep -q '"running":true'
+          echo "--- DNS answers through AdGuard"; dig +short +time=5 @127.0.0.1 example.com | grep -qE '^[0-9.]+$'
+          echo "--- clock fallback installed"; systemctl is-enabled pgw-clockfix.service
+          echo ALL FIRST-BOOT CHECKS PASSED
