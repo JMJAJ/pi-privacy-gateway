@@ -13,7 +13,9 @@ curl -fsSL -o base.img.xz "$BASE/$NAME"
 curl -fsSL "$BASE/SHA256SUMS" | grep " \*\?$NAME\$" | awk '{print $1"  base.img.xz"}' | sha256sum -c -
 xz -d -T0 base.img.xz
 # boot partition (FAT, partition 1): write our files with mtools, no root or loop devices needed
-START=$(sfdisk -d base.img | awk '/base.img1/ {for (i=1;i<=NF;i++) if ($i ~ /^start=/) {gsub(/[^0-9]/,"",$i); print $i}}')
+# sfdisk -d prints e.g. "base.img1 : start=        2048, size= ..."
+START=$(sfdisk -d base.img | sed -n 's/^base\.img1 *: *start= *\([0-9][0-9]*\).*//p')
+[ -n "$START" ] || { echo "could not find the boot partition" >&2; exit 1; }
 OFF=$((START * 512))
 for f in user-data network-config; do mcopy -o -i "base.img@@$OFF" "$f" "::$f"; done
 mdir -i "base.img@@$OFF" ::user-data ::network-config
