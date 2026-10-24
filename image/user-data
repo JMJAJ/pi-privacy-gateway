@@ -1,0 +1,17 @@
+#cloud-config
+# Pi Privacy Gateway - first boot. Flash the image, (optionally) put your Wi-Fi in network-config,
+# power on and wait ~15 minutes. Then log in as ubuntu / ubuntu (you must choose a new password)
+# and run:  sudo cat /opt/pi-privacy-gateway/.env   for the AdGuard login.
+# Don't use Raspberry Pi Imager's "OS customisation" with this image: it replaces this file.
+hostname: pi-privacy-gateway
+package_update: true
+package_upgrade: true
+packages:
+  - docker.io
+  - docker-compose-v2
+  - git
+  - curl
+  - qrencode
+runcmd:
+  - [sh, -c, 'exec >>/var/log/pgw-firstboot.log 2>&1; set -x; git clone --depth 1 https://github.com/JMJAJ/pi-privacy-gateway.git /opt/pi-privacy-gateway && cd /opt/pi-privacy-gateway && ./scripts/setup.sh --yes && docker compose up -d --build && echo PGW_FIRSTBOOT_DONE']
+final_message: "Pi Privacy Gateway first boot finished after $UPTIME s - see /var/log/pgw-firstboot.log"

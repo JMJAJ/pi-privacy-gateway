@@ -1,13 +1,14 @@
 #!/bin/bash
 # Prepare a Linux host (Raspberry Pi OS, Ubuntu, Debian, ...) for Pi Privacy Gateway.
-# Safe to re-run. Usage:  sudo ./scripts/setup.sh
+# Safe to re-run. Usage:  sudo ./scripts/setup.sh [--yes]   (--yes: answer every question with yes)
 set -euo pipefail
+YES=0; [ "${1:-}" = --yes ] && YES=1
 cd "$(dirname "$0")/.."
 
 ok()   { printf '  \033[32mok\033[0m    %s\n' "$*"; }
 warn() { printf '  \033[33mnote\033[0m  %s\n' "$*"; }
 die()  { printf '  \033[31mfail\033[0m  %s\n' "$*"; exit 1; }
-ask()  { local a; read -r -p "  $1 [y/N] " a; [[ $a =~ ^[Yy] ]]; }
+ask()  { [ "$YES" = 1 ] && return 0; local a; read -r -p "  $1 [y/N] " a; [[ $a =~ ^[Yy] ]]; }
 
 [ "$(id -u)" -eq 0 ] || die "run with sudo"
 [ "$(uname -s)" = Linux ] || die "Linux only"
@@ -31,6 +32,35 @@ if [ -e /dev/watchdog ] && [ ! -f /etc/systemd/system.conf.d/watchdog.conf ]; th
   printf '[Manager]\nRuntimeWatchdogSec=10\nRebootWatchdogSec=2min\n' > /etc/systemd/system.conf.d/watchdog.conf
   systemctl daemon-reexec && ok "hardware watchdog enabled"
 fi
+
+# clock: no battery clock on a Pi + Tor needs the right time + in Tor mode DNS needs Tor = a deadlock
+# at boot. Give the time service DNS-free servers and add an HTTPS-time fallback (scripts/pgw-clockfix).
+DNSFREE="216.239.35.0 216.239.35.4 216.239.35.8"   # Google's anycast time servers
+if command -v chronyc >/dev/null; then
+  mkdir -p /etc/chrony/sources.d /etc/chrony/conf.d
+  printf '# no DNS needed (works even when DNS depends on Tor)\n' > /etc/chrony/sources.d/pgw-dnsfree.sources
+  for ip in $DNSFREE; do echo "server $ip iburst" >> /etc/chrony/sources.d/pgw-dnsfree.sources; done
+  printf '# no battery clock: always allow stepping a wrong clock\nmakestep 1 -1\n' > /etc/chrony/conf.d/pgw-step.conf
+  systemctl restart chrony 2>/dev/null || systemctl restart chronyd 2>/dev/null || true
+elif systemctl list-unit-files systemd-timesyncd.service >/dev/null 2>&1; then
+  mkdir -p /etc/systemd/timesyncd.conf.d
+  printf '[Time]\nFallbackNTP=%s\n' "$DNSFREE" > /etc/systemd/timesyncd.conf.d/pgw.conf
+  systemctl restart systemd-timesyncd 2>/dev/null || true
+fi
+install -m 755 scripts/pgw-clockfix /usr/local/sbin/pgw-clockfix
+cat > /etc/systemd/system/pgw-clockfix.service <<'UNIT'
+[Unit]
+Description=Set the clock from HTTPS if NTP has not synced 90 s after boot (Tor needs a correct clock)
+Wants=network-online.target
+After=network-online.target time-sync.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pgw-clockfix
+TimeoutStartSec=180
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload && systemctl enable -q pgw-clockfix.service && ok "clock: DNS-free time servers + HTTPS fallback at boot"
 
 # 2. Docker + compose
 if ! command -v docker >/dev/null; then
@@ -74,12 +104,25 @@ else
 fi
 mkdir -p data/gateway data/wireguard data/adguard && chmod 700 data/gateway data/wireguard
 
+# 6. AdGuard Home pre-configured with the login from .env, so there is no setup wizard to click through
+WIZARD=0
+if [ ! -f data/adguard/conf/AdGuardHome.yaml ]; then
+  # shellcheck disable=SC1091
+  . ./.env
+  if scripts/adguard-seed.sh "$ADGUARD_USER" "$ADGUARD_PASSWORD" data/adguard/conf >/dev/null; then
+    mkdir -p data/adguard/work; ok "AdGuard Home pre-configured (login: $ADGUARD_USER / the ADGUARD_PASSWORD in .env)"
+  else
+    WIZARD=1; warn "could not pre-configure AdGuard Home: finish its setup wizard at :3000 after starting"
+  fi
+fi
+
+WIZ_STEP="(AdGuard Home is already set up)"
+[ "$WIZARD" = 1 ] && WIZ_STEP="open http://$(hostname -I | awk '{print $1}'):3000 and finish AdGuard's wizard (port 3000, DNS on 53, login from .env)"
 cat <<EOF
 
 Next:
   1. docker compose up -d --build
-  2. open http://$(hostname -I | awk '{print $1}'):3000 and finish AdGuard's wizard
-     (admin web interface on port 3000, DNS on port 53, login from .env)
+  2. $WIZ_STEP
   3. docker compose exec gateway pgw add-peer phone      # scan the QR with the WireGuard app
   4. dashboard: http://10.13.13.1/dashboard (through the VPN) or http://$(hostname -I | awk '{print $1}')/dashboard
 EOF

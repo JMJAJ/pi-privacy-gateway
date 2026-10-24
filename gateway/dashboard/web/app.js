@@ -406,6 +406,9 @@ function anatomyBar(title, sub, segs, note) {
   return `<div class="anat"><div class="anat-title">${title}<span>${sub} · ${Math.round((100 * hdr) / total)}% headers</span></div>
     <div class="anat-bar">${bar}</div>${note ? `<div class="anat-note">${note}</div>` : ''}</div>`;
 }
+// how Tor cells reach the first hop: TLS to a guard, or WebRTC (UDP + DTLS + SCTP) to a Snowflake proxy
+let torBridge = 'off';
+const torWire = () => torBridge === 'snowflake' ? [['UDP', 8, 'hdr'], ['DTLS', 29, 'tor'], ['SCTP', 28, 'tor']] : [['TCP', 20, 'hdr'], ['TLS', 29, 'tor']];
 function renderAnatomy(mode) {
   const lan = ['LAN link (Wi-Fi/Ethernet)', 50, 'l2'];
   const wgPkt = (name, cls) => [['IP', 20, 'hdr'], ['UDP', 8, 'hdr'], [name, 32, cls]];
@@ -416,12 +419,12 @@ function renderAnatomy(mode) {
       [lan, ...wgPkt('WARP', 'tun'), ...wgPkt(S.provider_name, 'prov'), ...inner, ['your data', 1180, 'pay']],
       `Two WireGuard layers: the outer one (WARP) hides from your ISP that you use ${esc(S.provider_name)}; the inner one hides your destinations from Cloudflare.`);
   } else if (mode === 'tor' && S.tor_via === 'provider') {
-    html += anatomyBar(`Hop 2 · gateway → Tor guard, inside ${esc(S.provider_name)}, inside WARP`, `WARP + ${esc(S.provider_name)} + TLS + 3 onion layers`,
-      [lan, ...wgPkt('WARP', 'tun'), ...wgPkt(S.provider_name, 'prov'), ...inner, ['TLS', 29, 'tor'], ['cell hdr', 16, 'tor'], ['data (3× onion-encrypted)', 498, 'pay']],
+    html += anatomyBar(`Hop 2 · gateway → ${torBridge === 'snowflake' ? 'Snowflake proxy' : 'Tor guard'}, inside ${esc(S.provider_name)}, inside WARP`, `WARP + ${esc(S.provider_name)} + TLS + 3 onion layers`,
+      [lan, ...wgPkt('WARP', 'tun'), ...wgPkt(S.provider_name, 'prov'), inner[0], ...torWire(), ['cell hdr', 16, 'tor'], ['data (3× onion-encrypted)', 498, 'pay']],
       `Each Tor cell is encrypted three times, sent over TLS to the guard, wrapped in ${esc(S.provider_name)}'s WireGuard and then in WARP's. Your ISP sees only WARP, Cloudflare only ${esc(S.provider_name)}, ${esc(S.provider_name)} only Tor, the guard only ${esc(S.provider_name)}'s IP.`);
   } else if (mode === 'tor') {
-    html += anatomyBar('Hop 2 · gateway → Tor guard, inside WARP', 'WARP + TLS + 3 onion layers',
-      [lan, ...wgPkt('WARP', 'tun'), ...inner, ['TLS', 29, 'tor'], ['cell hdr', 16, 'tor'], ['data (3× onion-encrypted)', 498, 'pay']],
+    html += anatomyBar(torBridge === 'snowflake' ? 'Hop 2 · gateway → Snowflake proxy, inside WARP' : 'Hop 2 · gateway → Tor guard, inside WARP', 'WARP + TLS + 3 onion layers',
+      [lan, ...wgPkt('WARP', 'tun'), inner[0], ...torWire(), ['cell hdr', 16, 'tor'], ['data (3× onion-encrypted)', 498, 'pay']],
       'Tor packs data into fixed 514-byte cells, encrypts each three times (exit, middle, guard keys) and sends them over TLS to the guard relay, all inside WARP.');
   } else {
     html += anatomyBar('Hop 2 · gateway → Cloudflare WARP', 'encrypted by WireGuard (wg0)', [lan, ...wgPkt('WARP', 'tun'), ...inner, ['your data', 1240, 'pay']],
@@ -451,6 +454,7 @@ function renderRoute(mode, ex, w, pv, T, hasProv) {
     row('Cloudflare can see', tor && S.tor_via === 'provider' ? `your IP + that you use ${esc(S.provider_name)}; not that you use Tor, not the sites` : tor ? 'your IP + that you use Tor; not the sites' : prov ? `your IP + that you use ${esc(S.provider_name)}; not the sites` : 'your IP + the sites you visit (not HTTPS content)') +
     (prov ? row(`${esc(S.provider_name)} can see`, 'the sites you visit, but not your IP') : '') +
     (tor && S.tor_via === 'provider' ? row(`${esc(S.provider_name)} can see`, 'that you use Tor (encrypted) and Cloudflare’s IP; not your IP, not the sites') : '') +
+    (tor && torBridge === 'snowflake' ? row('Snowflake proxy sees', 'that someone uses Tor, from ' + (S.tor_via === 'provider' ? esc(S.provider_name) + '’s' : 'Cloudflare’s') + ' IP; not the sites') : '') +
     (tor ? row('Tor guard relay sees', S.tor_via === 'provider' ? `${esc(S.provider_name)}’s IP, never yours` : 'Cloudflare’s WARP IP, never yours') : '') + '</div>';
   const items = [['Home router', (lat.router || {}).ms], ['Cloudflare WARP edge', (lat.warp_edge || {}).ms], ['Internet via WARP', (lat.via_warp || {}).ms]];
   if (hasProv) items.push([`Internet via ${S.provider_name}`, (lat.via_provider || {}).ms]);
@@ -458,7 +462,7 @@ function renderRoute(mode, ex, w, pv, T, hasProv) {
   const mx = Math.max(1, ...items.map((i) => i[1] || 0));
   $('latency').innerHTML = items.map(([k, v], i) =>
     `<div class="lat-row"><span>${esc(k)}</span><div class="hbar ${i === items.length - 1 ? 'tor' : ''}"><div style="width:${v ? Math.max(2, (100 * v) / mx) : 0}%"></div></div><span class="n">${v == null ? '—' : num(v, v < 10 ? 1 : 0) + ' ms'}</span></div>`).join('');
-  for (const id of ['tor-restart', 'tor-newnym', 'tor-country']) if ($(id)) $(id).hidden = !S.trusted;
+  for (const id of ['tor-restart', 'tor-newnym', 'tor-country', 'tor-bridge']) if ($(id)) $(id).hidden = !S.trusted;
   $('tor-hint').textContent = tor ? (S.tor_via === 'provider' ? `Your VPN traffic flows through this circuit; Tor reaches it through ${S.provider_name}` : 'Your VPN traffic currently flows through this circuit') : 'Not carrying your traffic right now';
   const path = T.path || [];
   $('tor-circuit').innerHTML = (path.length ? '<div class="flow">' + ['<div class="hopbox"><div class="r">You</div><div class="nm">Gateway</div><div class="mono muted">via WARP</div></div>']
@@ -540,6 +544,8 @@ async function loadTorExit() {
     sel.innerHTML = '<option value="">Exit: any country (recommended)</option>' +
       Object.entries(j.options).map(([c, n]) => `<option value="${esc(c)}">${esc(n)}</option>`).join('');
     sel.value = j.country || '';
+    torBridge = j.bridge || 'off';
+    if ($('tor-bridge')) { $('tor-bridge').value = torBridge; $('tor-bridge').disabled = !!j.bridge_busy; }
   } catch (_) { /* leave empty */ }
 }
 if ($('tor-country')) {
@@ -549,6 +555,23 @@ if ($('tor-country')) {
     sel.disabled = false; loadTorExit();
   });
   loadTorExit();
+}
+if ($('tor-bridge')) {
+  $('tor-bridge').addEventListener('change', async () => {
+    const sel = $('tor-bridge'), on = sel.value === 'snowflake';
+    sel.disabled = true;
+    $('tor-hint').textContent = on ? 'Connecting Tor through Snowflake (2-6 min; Tor-mode devices pause meanwhile, it reverts automatically if it fails)…' : 'Removing the bridge…';
+    try { await postJSON('/api/tor/bridge', { on }); } catch (_) { /* polled below */ }
+    const poll = setInterval(async () => {
+      try {
+        const j = await (await fetch('/api/tor/exit', { cache: 'no-store' })).json();
+        if (j.bridge_busy) return;
+        clearInterval(poll);
+        torBridge = j.bridge || 'off'; sel.value = torBridge; sel.disabled = false;
+        $('tor-hint').textContent = j.bridge_msg || (torBridge === 'snowflake' ? 'Snowflake bridge on' : 'Bridge off');
+      } catch (_) { /* keep polling */ }
+    }, 5000);
+  });
 }
 
 function renderSystem(sys, pw) {

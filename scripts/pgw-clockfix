@@ -1,0 +1,25 @@
+#!/bin/sh
+# pgw-clockfix - a Raspberry Pi has no battery clock, so it boots with an old time. Tor refuses to work
+# with a wrong clock, and in Tor mode DNS goes through Tor, so NTP server names can't be resolved: a
+# deadlock that can leave the internet down for most of an hour. setup.sh also adds DNS-free NTP servers;
+# this is the last resort: if the clock is still not synced 90 s after boot, take the time from
+# Cloudflare's HTTPS Date header (through WARP), then restart Tor in the gateway container.
+log() { logger -t pgw-clockfix "$*"; echo "$*"; }
+synced() {
+  if command -v chronyc >/dev/null; then chronyc tracking 2>/dev/null | grep -q 'Leap status *: Normal'
+  else timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -q yes; fi
+}
+for _ in $(seq 1 18); do synced && { log "clock synced by NTP"; exit 0; }; sleep 5; done
+for url in https://1.1.1.1/ https://cloudflare.com/; do
+  # first with certificate checks; the clock may be too far off for them, then without (time only)
+  d=$(curl -sI -m 8 "$url" 2>/dev/null | awk -F': ' 'tolower($1)=="date"{print $2}' | tr -d '\r')
+  [ -n "$d" ] || d=$(curl -skI -m 8 "$url" 2>/dev/null | awk -F': ' 'tolower($1)=="date"{print $2}' | tr -d '\r')
+  if [ -n "$d" ] && date -s "$d" >/dev/null 2>&1; then
+    log "NTP not synced after 90 s - clock set from $url Date header: $d"
+    command -v chronyc >/dev/null && chronyc makestep >/dev/null 2>&1
+    docker exec pgw-gateway pkill -TERM -x tor >/dev/null 2>&1 || true   # Tor gives up on a bad clock
+    exit 0
+  fi
+done
+log "could not set the clock (no internet yet?)"
+exit 1

@@ -8,6 +8,10 @@
 #   pgw-exit firewall                       (re)arm the kill switch only (no waiting for tunnels)
 #   pgw-exit tor-via warp|provider|status   how Tor itself reaches the internet: straight into WARP, or
 #                                           through the provider (inside WARP) = "Provider+Tor"
+#   pgw-exit tor-bridge snowflake|off|status   reach Tor through a Snowflake bridge (hides Tor use)
+#
+# Optional TAILSCALE_EXIT=on: devices away from home that use this host as their Tailscale exit node
+# get the same exit, kill switch, TTL masking and Tor redirect as WireGuard devices.
 #
 # warp:     -> Cloudflare WARP (wg0). Anything else is rejected.
 # provider: -> your WireGuard VPN provider (wg2), which itself runs inside WARP.
@@ -26,6 +30,14 @@ TOR_TRANS=9040
 TOR_DNS=127.0.0.1:9053
 WARP_UPSTREAMS='["https://dns.quad9.net/dns-query","https://cloudflare-dns.com/dns-query"]'
 WARP_FALLBACK='["https://dns.mullvad.net/dns-query"]'
+# provider mode: no Cloudflare resolver (Cloudflare already knows your IP through WARP), and the
+# gateway's own DNS-over-HTTPS connections to these resolvers ride the provider tunnel
+PROVIDER_UPSTREAMS='["https://dns.quad9.net/dns-query","https://dns.mullvad.net/dns-query"]'
+PROVIDER_FALLBACK='["https://dns.mullvad.net/dns-query"]'
+DOH_IPS="9.9.9.9 149.112.112.112 194.242.2.2"
+BRIDGE_FILE="$CFG/tor-bridge"
+TS_IF=tailscale0 TS_NET=100.64.0.0/10 TS_TABLE=52
+ts_on() { [ "${TAILSCALE_EXIT:-off}" = on ]; }
 
 tor_via() { [ "$(cat "$TORVIA_FILE" 2>/dev/null)" = provider ] && [ -f "$WG/wg2.conf" ] && echo provider || echo warp; }
 
@@ -51,25 +63,27 @@ firewall() {
   exec 9>&-
 }
 
-# rules for one traffic class: $1 = mode, $2 = extra match ("-s <ip>" for one device, "" for the rest)
+# rules for one traffic class: $1 = mode, $2 = extra match ("-s <ip>" for one device, "" for the rest),
+# $3 = client interface (wg1, or tailscale0 for devices away from home)
 _mode_rules() {
-  local mode=$1 m=$2
+  local mode=$1 m=$2 i=${3:-wg1} own=$VPN_IP
+  [ "$i" = "$TS_IF" ] && own=$TS_NET
   case "$mode" in
     tor)
       # shellcheck disable=SC2086
-      iptables -t nat -A PIX_NAT -i wg1 $m -p tcp ! -d "$VPN_IP" -j REDIRECT --to-ports $TOR_TRANS ;;
+      iptables -t nat -A PIX_NAT -i "$i" $m -p tcp ! -d "$own" -j REDIRECT --to-ports $TOR_TRANS ;;
     provider)
       # shellcheck disable=SC2086
-      iptables -A PIX_FWD -i wg1 $m -o wg2 -j ACCEPT ;;
+      iptables -A PIX_FWD -i "$i" $m -o wg2 -j ACCEPT ;;
     *)
       # shellcheck disable=SC2086
-      iptables -A PIX_FWD -i wg1 $m -o wg0 -j ACCEPT ;;
+      iptables -A PIX_FWD -i "$i" $m -o wg0 -j ACCEPT ;;
   esac
   # kill switch for this class: anything not allowed above never reaches the LAN/ISP
   # shellcheck disable=SC2086
-  iptables -A PIX_FWD -i wg1 $m -p tcp -j REJECT --reject-with tcp-reset
+  iptables -A PIX_FWD -i "$i" $m -p tcp -j REJECT --reject-with tcp-reset
   # shellcheck disable=SC2086
-  iptables -A PIX_FWD -i wg1 $m -j REJECT
+  iptables -A PIX_FWD -i "$i" $m -j REJECT
 }
 
 _firewall() {
@@ -82,6 +96,14 @@ _firewall() {
   ip6tables -N PIX_FWD 2>/dev/null || ip6tables -F PIX_FWD
   ip6tables -C FORWARD -j PIX_FWD 2>/dev/null || ip6tables -I FORWARD 1 -j PIX_FWD
   ip6tables -A PIX_FWD -i wg1 -j REJECT
+  ts_on && ip6tables -A PIX_FWD -i $TS_IF -j REJECT
+
+  # anti-fingerprinting: every device's packets leave with TTL 64, so sites can't tell
+  # Windows (128) from Android/iOS/Linux (64) by the TTL that arrives
+  iptables -t mangle -N PIX_MANGLE 2>/dev/null || iptables -t mangle -F PIX_MANGLE
+  iptables -t mangle -C FORWARD -j PIX_MANGLE 2>/dev/null || iptables -t mangle -I FORWARD 1 -j PIX_MANGLE
+  iptables -t mangle -A PIX_MANGLE -i wg1 -j TTL --ttl-set 64 2>/dev/null || true
+  ts_on && { iptables -t mangle -A PIX_MANGLE -i $TS_IF -j TTL --ttl-set 64 2>/dev/null || true; }
 
   # what VPN devices may reach on the gateway itself (works even if the host runs ufw/firewalld)
   iptables -N PIX_IN 2>/dev/null || iptables -F PIX_IN
@@ -94,9 +116,25 @@ _firewall() {
   # letting it hang ~20 s before falling back to normal DNS (made pages stall on phones)
   iptables -A PIX_IN -i wg1 -p tcp --dport 853 -j REJECT --reject-with tcp-reset
   iptables -A PIX_IN -i wg1 -p icmp -j ACCEPT
+  if ts_on; then   # your own Tailscale devices: DNS, dashboard, Tor's transparent port
+    iptables -A PIX_IN -i $TS_IF -p udp --dport 53 -j ACCEPT
+    iptables -A PIX_IN -i $TS_IF -p tcp -m multiport --dports 53,"${DASHBOARD_PORT:-80}",$TOR_TRANS -j ACCEPT
+  fi
 
   # replies back to devices (ACCEPT, not RETURN: hosts running Docker default FORWARD to DROP)
   iptables -A PIX_FWD -o wg1 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  ts_on && iptables -A PIX_FWD -o $TS_IF -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+  # Tailscale clients: replies go back into Tailscale (before WARP's catch-all rule 99) and their
+  # traffic leaves with the gateway's tunnel address
+  ip rule del priority 97 2>/dev/null || true
+  iptables -t nat -N PIX_POST 2>/dev/null || iptables -t nat -F PIX_POST
+  iptables -t nat -C POSTROUTING -j PIX_POST 2>/dev/null || iptables -t nat -I POSTROUTING 1 -j PIX_POST
+  if ts_on; then
+    ip rule add priority 97 to $TS_NET lookup $TS_TABLE
+    iptables -t nat -A PIX_POST -s $TS_NET -o wg0 -j MASQUERADE
+    iptables -t nat -A PIX_POST -s $TS_NET -o wg2 -j MASQUERADE
+  fi
 
   # routing: per-device rules (94) are checked before the default provider rule (95);
   # both before WARP's fixed rules (98/99), whatever order things started in
@@ -119,6 +157,17 @@ _firewall() {
   # 2) everyone else follows the default
   [ "$default" = provider ] && ip rule add priority 95 iif wg1 lookup $PROVIDER_TABLE
   _mode_rules "$default" ""
+  if ts_on; then   # 2b) devices away from home (Tailscale) follow the same default
+    [ "$default" = provider ] && ip rule add priority 95 iif $TS_IF lookup $PROVIDER_TABLE
+    _mode_rules "$default" "" "$TS_IF"
+  fi
+
+  # 2c) the gateway's own DNS-over-HTTPS goes through the provider while it carries devices
+  #     (iif lo = only traffic the gateway itself creates); if the provider is down it falls back to WARP
+  while ip rule del priority 91 2>/dev/null; do :; done
+  if uses provider; then
+    for d in $DOH_IPS; do ip rule add priority 91 to "$d" iif lo lookup $PROVIDER_TABLE; done
+  fi
 
   # 3) Provider+Tor: Tor's own connections (its uid) use the provider table; if that tunnel is down
   #    they get "unreachable" instead of slipping out through WARP (fail closed)
@@ -136,7 +185,11 @@ adguard_api() { curl -sf -m 5 -u "$ADGUARD_USER:$ADGUARD_PASSWORD" "$@"; }
 adguard_dns() {
   [ -n "${ADGUARD_USER:-}" ] && [ -n "${ADGUARD_PASSWORD:-}" ] || { log "AdGuard credentials not set: DNS upstream unchanged"; return 0; }
   local default=$1 up fb ip mode
-  if [ "$default" = tor ]; then up="[\"$TOR_DNS\"]"; fb="[\"$TOR_DNS\"]"; else up=$WARP_UPSTREAMS; fb=$WARP_FALLBACK; fi
+  case "$default" in
+    tor)      up="[\"$TOR_DNS\"]"; fb="[\"$TOR_DNS\"]" ;;
+    provider) up=$PROVIDER_UPSTREAMS; fb=$PROVIDER_FALLBACK ;;
+    *)        up=$WARP_UPSTREAMS; fb=$WARP_FALLBACK ;;
+  esac
   for _ in $(seq 1 30); do
     adguard_api -H 'Content-Type: application/json' -d "{\"upstream_dns\":$up,\"fallback_dns\":$fb}" \
       "$ADGUARD_URL/control/dns_config" >/dev/null && break
@@ -149,10 +202,19 @@ for c in (json.load(sys.stdin).get("clients") or []):
     if c.get("name", "").startswith("pgw-"): print(c["name"])' 2>/dev/null); do
     adguard_api -H 'Content-Type: application/json' -d "{\"name\":\"$ip\"}" "$ADGUARD_URL/control/clients/delete" >/dev/null
   done
+  # a device whose exit differs from the default gets that exit's resolvers
+  # (a WARP device under a provider/Tor default keeps the stricter default)
+  local ups
   while read -r ip mode; do
-    [ "$(effective "$mode")" = tor ] && [ "$default" != tor ] || continue
+    mode=$(effective "$mode")
+    [ "$mode" != "$default" ] || continue
+    case "$mode" in
+      tor)      ups="[\"$TOR_DNS\"]" ;;
+      provider) ups=$PROVIDER_UPSTREAMS ;;
+      *)        continue ;;
+    esac
     adguard_api -H 'Content-Type: application/json' "$ADGUARD_URL/control/clients/add" -d \
-      "{\"name\":\"pgw-$ip\",\"ids\":[\"$ip\"],\"use_global_settings\":true,\"use_global_blocked_services\":true,\"upstreams\":[\"$TOR_DNS\"]}" >/dev/null
+      "{\"name\":\"pgw-$ip\",\"ids\":[\"$ip\"],\"use_global_settings\":true,\"use_global_blocked_services\":true,\"upstreams\":$ups}" >/dev/null
   done < <(overrides)
   adguard_api -X POST "$ADGUARD_URL/control/cache_clear" >/dev/null
   return 0
@@ -187,6 +249,8 @@ apply() {   # $1 = --nowait: background loop - never stall it waiting for Tor or
       log "$PROVIDER_NAME not reachable - its devices stay blocked until it connects"; return 1
     fi
   fi
+  # a newer "pgw-exit set" may have run while we waited for Tor/the provider: it owns DNS now
+  [ "$(saved_mode)" = "$default" ] || { log "exit mode changed to $(saved_mode) while waiting - leaving it"; return 0; }
   adguard_dns "$(effective "$default")"
   { echo "$default"; overrides; cat /run/pgw/failover 2>/dev/null; } | md5sum | cut -c1-12 > /run/pgw/applied
   log "exit mode: $default$(overrides | awk '{printf " | %s=%s", $1, $2}')"
@@ -230,5 +294,20 @@ case "${1:-status}" in
         else log "Tor not connected yet (it keeps trying)"; fi ;;
       *) echo "usage: pgw-exit tor-via warp|provider|status" >&2; exit 2 ;;
     esac ;;
-  *) echo "usage: pgw-exit status | set <mode> | device <ip> <mode|default> | devices | tor-via <warp|provider> | apply | firewall" >&2; exit 2 ;;
+  tor-bridge)
+    case "${2:-status}" in
+      status) [ "$(cat "$BRIDGE_FILE" 2>/dev/null)" = snowflake ] && echo snowflake || echo off ;;
+      off|snowflake)
+        old=$(cat "$BRIDGE_FILE" 2>/dev/null || echo off)
+        echo "$2" > "$BRIDGE_FILE"; make_torrc; chmod 644 "$CFG/tor/torrc"
+        pkill -TERM -x tor || true                  # supervisord starts it again with the new config
+        # Snowflake has to find a volunteer proxy first: allow ~6 min before giving up
+        if tor_ready 36; then log "Tor bridge: $2"
+        elif [ "$2" = snowflake ]; then
+          echo "$old" > "$BRIDGE_FILE"; make_torrc; chmod 644 "$CFG/tor/torrc"; pkill -TERM -x tor || true
+          log "Snowflake could not connect - back to the previous Tor connection"; exit 1
+        else log "Tor not connected yet (it keeps trying)"; fi ;;
+      *) echo "usage: pgw-exit tor-bridge snowflake|off|status" >&2; exit 2 ;;
+    esac ;;
+  *) echo "usage: pgw-exit status | set <mode> | device <ip> <mode|default> | devices | tor-via <warp|provider> | tor-bridge <snowflake|off> | apply | firewall" >&2; exit 2 ;;
 esac

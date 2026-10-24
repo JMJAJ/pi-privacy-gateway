@@ -90,6 +90,28 @@ def _apply_exit_when_ready():
             return
 
 
+# Snowflake bridge: switching takes minutes (Tor has to find a volunteer proxy), so it runs in the
+# background and the page polls bridge_state()
+_bridge = {"busy": False, "last": ""}
+
+
+def bridge_state():
+    st = run(["/usr/local/bin/pgw-exit", "tor-bridge", "status"], timeout=5).strip()
+    return {"bridge": st or "off", "bridge_busy": _bridge["busy"], "bridge_msg": _bridge["last"]}
+
+
+def bridge_switch(to):
+    _bridge.update(busy=True, last="")
+    try:
+        r = subprocess.run(["/usr/local/bin/pgw-exit", "tor-bridge", to], capture_output=True, text=True, timeout=600)
+        lines = (r.stdout + r.stderr).strip().splitlines()
+        _bridge["last"] = lines[-1] if lines else ""
+    except (OSError, subprocess.SubprocessError) as e:
+        _bridge["last"] = str(e)[:200]
+    finally:
+        _bridge["busy"] = False
+
+
 def tor_restart():
     """Stop Tor (at most once every 15 s); supervisord starts it again. The kill switch stays closed meanwhile."""
     if not _tor_lock.acquire(blocking=False):
@@ -494,6 +516,9 @@ def tor_info():
             "read_bytes": val(res[2]), "written_bytes": val(res[3])}
 
 
+_tor_seen = {"ip": None, "misses": 0}
+
+
 def slow():
     dev, _ = default_route()
     warp = trace_1111([])
@@ -502,11 +527,18 @@ def slow():
         isp["asn"], isp["as_name"] = asn_of(isp["ip"])
     provider = trace_1111(["--interface", "wg2"]) if os.path.exists(f"{WG_DIR}/wg2.conf") else {}
     tor_exit = None
+    # through a Snowflake bridge Tor can be slow: allow 30 s, and only report Tor as down after two misses
     try:
-        tor_exit = json.loads(run(["curl", "-s", "--max-time", "15", "--socks5-hostname", "127.0.0.1:9050",
-                                   "https://check.torproject.org/api/ip"], timeout=20)).get("IP")
+        tor_exit = json.loads(run(["curl", "-s", "--max-time", "30", "--socks5-hostname", "127.0.0.1:9050",
+                                   "https://check.torproject.org/api/ip"], timeout=35)).get("IP")
     except ValueError:
         pass
+    if tor_exit:
+        _tor_seen.update(ip=tor_exit, misses=0)
+    else:
+        _tor_seen["misses"] += 1
+        if _tor_seen["misses"] < 2:
+            tor_exit = _tor_seen["ip"]
     try:
         tor = tor_info()
     except Exception as exc:  # noqa: BLE001
@@ -988,7 +1020,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.trusted():
                 self.send(403, {"error": "connect through the VPN to do this"})
                 return
-            self.send(200, {"country": tor_exit_country(), "options": TOR_COUNTRIES, "via": tor_via()})
+            self.send(200, {"country": tor_exit_country(), "options": TOR_COUNTRIES, "via": tor_via(), **bridge_state()})
         elif path == "/api/mode":  # cheap, for tray apps
             self.send(200, {"mode": quick_mode(), "kill_switch": (get("killswitch") or {}).get("armed", False),
                             "can_control": self.trusted(), "provider": PROVIDER_NAME if os.path.exists(f"{WG_DIR}/wg2.conf") else None})
@@ -1064,6 +1096,15 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, IndexError):
                 ok = False
             self.send(200 if ok else 500, {"ok": ok, "error": None if ok else "Tor is not reachable"})
+        elif path == "/api/tor/bridge":
+            body = self.guarded_post()
+            if body is None:
+                return
+            if _bridge["busy"]:
+                self.send(409, {"error": "a bridge change is already running"})
+                return
+            threading.Thread(target=bridge_switch, args=("snowflake" if body.get("on") else "off",), daemon=True).start()
+            self.send(200, {"ok": True, "started": True})
         elif path == "/api/tor/via":
             body = self.guarded_post()
             if body is None:
