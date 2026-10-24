@@ -1,5 +1,9 @@
 # Wired Ethernet works out of the box. For Wi-Fi, uncomment the wifis block and fill in your network
 # (keep the indentation: two spaces per level).
+#  - regulatory-domain: your country's two-letter code (DE, CZ, GB, US, ...). Without it the Pi's Wi-Fi
+#    may not scan at all.
+#  - The Pi's built-in Wi-Fi often can't see 5 GHz networks: if your router has a separate 2.4 GHz name,
+#    use that one (or list both, as below).
 network:
   version: 2
   ethernets:
@@ -10,6 +14,9 @@ network:
 #    wlan0:
 #      dhcp4: true
 #      optional: true
+#      regulatory-domain: "DE"
 #      access-points:
 #        "YOUR-WIFI-NAME":
+#          password: "your-wifi-password"
+#        "YOUR-WIFI-NAME-2.4GHz":
 #          password: "your-wifi-password"

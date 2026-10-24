@@ -1,7 +1,7 @@
 #!/bin/bash
 # Builds a ready-to-flash image: the official Ubuntu Server 24.04 LTS image for Raspberry Pi
 # (checksum-verified) with this project's first-boot files added to its boot partition.
-# Needs: curl, xz-utils, mtools, fdisk.  Output: pi-privacy-gateway-<version>-raspi-arm64.img.xz
+# Needs: curl, xz-utils, mtools, fdisk, sudo (loop-mounts the system partition).  Output: pi-privacy-gateway-<version>-raspi-arm64.img.xz
 set -euo pipefail
 cd "$(dirname "$0")"
 VERSION=${1:-dev}
@@ -19,6 +19,16 @@ START=$(sfdisk -d base.img | sed -n 's/^base\.img1 *: *start= *\([0-9][0-9]*\).*
 OFF=$((START * 512))
 for f in user-data network-config; do mcopy -o -i "base.img@@$OFF" "$f" "::$f"; done
 mdir -i "base.img@@$OFF" ::user-data ::network-config
+# the installer goes into the system partition (ext4, partition 2) and is switched on there, so it runs
+# whatever first-boot file the card ends up with (ours, or the one Imager's setup screen writes)
+LOOP=$(sudo losetup -Pf --show base.img)
+trap 'sudo umount /mnt/pgwroot 2>/dev/null || true; sudo losetup -d "$LOOP" 2>/dev/null || true' EXIT
+sudo mkdir -p /mnt/pgwroot && sudo mount "${LOOP}p2" /mnt/pgwroot
+sudo install -o root -g root -m 755 rootfs/usr/local/sbin/pgw-firstboot /mnt/pgwroot/usr/local/sbin/pgw-firstboot
+sudo install -o root -g root -m 644 rootfs/etc/systemd/system/pgw-firstboot.service /mnt/pgwroot/etc/systemd/system/pgw-firstboot.service
+sudo ln -sf /etc/systemd/system/pgw-firstboot.service /mnt/pgwroot/etc/systemd/system/multi-user.target.wants/pgw-firstboot.service
+ls -l /mnt/pgwroot/etc/systemd/system/multi-user.target.wants/pgw-firstboot.service /mnt/pgwroot/usr/local/sbin/pgw-firstboot
+sudo umount /mnt/pgwroot && sudo losetup -d "$LOOP"; trap - EXIT
 OUT="pi-privacy-gateway-$VERSION-raspi-arm64.img"
 mv base.img "$OUT"
 EXTRACT_SIZE=$(stat -c %s "$OUT"); EXTRACT_SHA=$(sha256sum "$OUT" | cut -d' ' -f1)
@@ -26,8 +36,8 @@ xz -T0 -6 "$OUT"
 sha256sum "$OUT.xz" > "$OUT.xz.sha256"
 DL_SIZE=$(stat -c %s "$OUT.xz"); DL_SHA=$(cut -d' ' -f1 "$OUT.xz.sha256")
 # Raspberry Pi Imager reads this list (its --repo option): our image appears in its menu, with sizes and
-# checksums Imager verifies while writing. No init_format: Imager's OS customisation would replace
-# our first-boot setup, so it is not offered.
+# checksums Imager verifies while writing. init_format "cloudinit" turns on Imager's setup screen
+# (user, password, Wi-Fi + country, SSH key, time zone) - safe because the installer lives in the system.
 python3 - "$VERSION" "$OUT.xz" "$EXTRACT_SIZE" "$EXTRACT_SHA" "$DL_SIZE" "$DL_SHA" > os_list.json <<'PYJSON'
 import json, sys, datetime
 ver, name, xs, xsha, ds, dsha = sys.argv[1:]
@@ -39,6 +49,7 @@ print(json.dumps({"os_list": [{
     "image_download_size": int(ds), "image_download_sha256": dsha,
     "release_date": datetime.date.today().isoformat(),
     "devices": ["pi4-64bit", "pi5-64bit"],
+    "init_format": "cloudinit",
 }]}, indent=2))
 PYJSON
 ls -lh "$OUT.xz" os_list.json

@@ -62,15 +62,19 @@ jobs:
     needs: lint
     steps:
       - uses: actions/checkout@v7
-      - name: first boot (image/user-data runcmd)
+      - name: first boot (the pgw-firstboot installer from image/rootfs)
         run: |
-          sudo apt-get install -y -q git curl qrencode python3-yaml >/dev/null
-          cmd=$(python3 -c "import yaml;print(yaml.safe_load(open('image/user-data'))['runcmd'][0][2])")
-          cmd=${cmd//git clone --depth 1 https:\/\/github.com\/JMJAJ\/pi-privacy-gateway.git \/opt\/pi-privacy-gateway/cp -a $GITHUB_WORKSPACE \/opt\/pi-privacy-gateway}
-          echo "$cmd" | grep -q "cp -a" || { echo "could not adapt the runcmd"; exit 1; }
-          sudo sh -c "$cmd" || true
-          sudo cat /var/log/pgw-firstboot.log | tail -40
+          sudo apt-get install -y -q python3-yaml >/dev/null
+          # the exact script the card writes, with this commit instead of a clone from GitHub
+          cp image/rootfs/usr/local/sbin/pgw-firstboot /tmp/pgw-firstboot
+          sed -i "s#git clone --depth 1 https://github.com/JMJAJ/pi-privacy-gateway.git \"\$DIR\"#cp -a $GITHUB_WORKSPACE \"\$DIR\"#" /tmp/pgw-firstboot
+          grep -q "cp -a $GITHUB_WORKSPACE" /tmp/pgw-firstboot || { echo "could not adapt the script"; exit 1; }
+          # the runner ships Docker CE; the card installs Ubuntu's docker.io - skip that one package swap
+          sed -i 's/apt-get install -y -q docker.io docker-compose-v2 git curl qrencode/apt-get install -y -q git curl qrencode/' /tmp/pgw-firstboot
+          sudo bash /tmp/pgw-firstboot || true
+          sudo tail -40 /var/log/pgw-firstboot.log
           sudo grep -q PGW_FIRSTBOOT_DONE /var/log/pgw-firstboot.log
+          test -f /var/lib/pgw-installed
       - name: what a new user gets
         run: |
           cd /opt/pi-privacy-gateway
