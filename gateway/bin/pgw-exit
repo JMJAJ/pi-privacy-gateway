@@ -6,6 +6,8 @@
 #   pgw-exit devices                        list per-device overrides
 #   pgw-exit apply                          re-apply everything
 #   pgw-exit firewall                       (re)arm the kill switch only (no waiting for tunnels)
+#   pgw-exit tor-via warp|provider|status   how Tor itself reaches the internet: straight into WARP, or
+#                                           through the provider (inside WARP) = "Provider+Tor"
 #
 # warp:     -> Cloudflare WARP (wg0). Anything else is rejected.
 # provider: -> your WireGuard VPN provider (wg2), which itself runs inside WARP.
@@ -18,11 +20,14 @@ set -u
 . /usr/local/bin/pgw-lib
 MODE_FILE="$CFG/mode"
 DEV_FILE="$CFG/device-modes"          # lines: "<vpn-ip> <mode>"
+TORVIA_FILE="$CFG/tor-via"            # "provider" = Tor runs through the provider tunnel
 ADGUARD_URL="${ADGUARD_URL:-http://127.0.0.1:3000}"
 TOR_TRANS=9040
 TOR_DNS=127.0.0.1:9053
 WARP_UPSTREAMS='["https://dns.quad9.net/dns-query","https://cloudflare-dns.com/dns-query"]'
 WARP_FALLBACK='["https://dns.mullvad.net/dns-query"]'
+
+tor_via() { [ "$(cat "$TORVIA_FILE" 2>/dev/null)" = provider ] && [ -f "$WG/wg2.conf" ] && echo provider || echo warp; }
 
 valid_mode() { case "$1" in warp|provider|tor) return 0 ;; *) return 1 ;; esac; }
 saved_mode() { local m; m=$(cat "$MODE_FILE" 2>/dev/null); valid_mode "$m" && echo "$m" || echo warp; }
@@ -114,6 +119,16 @@ _firewall() {
   # 2) everyone else follows the default
   [ "$default" = provider ] && ip rule add priority 95 iif wg1 lookup $PROVIDER_TABLE
   _mode_rules "$default" ""
+
+  # 3) Provider+Tor: Tor's own connections (its uid) use the provider table; if that tunnel is down
+  #    they get "unreachable" instead of slipping out through WARP (fail closed)
+  while ip rule del priority 92 2>/dev/null; do :; done
+  while ip rule del priority 93 2>/dev/null; do :; done
+  if [ "$(tor_via)" = provider ]; then
+    local tuid; tuid=$(id -u debian-tor)
+    ip rule add priority 92 uidrange "$tuid-$tuid" lookup $PROVIDER_TABLE
+    ip rule add priority 93 uidrange "$tuid-$tuid" unreachable
+  fi
 }
 
 adguard_api() { curl -sf -m 5 -u "$ADGUARD_USER:$ADGUARD_PASSWORD" "$@"; }
@@ -153,8 +168,8 @@ tunnel_ready() {  # $1 = interface; brings it up if needed and checks it reaches
   return 1
 }
 
-tor_ready() {
-  for _ in $(seq 1 45); do
+tor_ready() {   # $1 = attempts (default 45, ~2-7 min)
+  for _ in $(seq 1 "${1:-45}"); do
     curl -s -m 8 --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip | grep -q '"IsTor":true' && return 0
     sleep 2
   done
@@ -201,5 +216,19 @@ case "${1:-status}" in
     [ "$mode" = default ] || echo "$ip $mode" >> "$DEV_FILE.new"
     mv "$DEV_FILE.new" "$DEV_FILE"; sync "$DEV_FILE"
     apply ;;
-  *) echo "usage: pgw-exit status | set <mode> | device <ip> <mode|default> | devices | apply | firewall" >&2; exit 2 ;;
+  tor-via)
+    case "${2:-status}" in
+      status) tor_via ;;
+      warp|provider)
+        [ "$2" != provider ] || [ -f "$WG/wg2.conf" ] || { echo "no provider configured" >&2; exit 2; }
+        echo "$2" > "$TORVIA_FILE"; firewall
+        pkill -TERM -x tor || true                  # supervisord starts it again on the new path
+        if tor_ready 12; then log "Tor now reaches the internet via $2"
+        elif [ "$2" = provider ]; then
+          echo warp > "$TORVIA_FILE"; firewall; pkill -TERM -x tor || true
+          log "Tor could not connect through $PROVIDER_NAME - back to WARP"; exit 1
+        else log "Tor not connected yet (it keeps trying)"; fi ;;
+      *) echo "usage: pgw-exit tor-via warp|provider|status" >&2; exit 2 ;;
+    esac ;;
+  *) echo "usage: pgw-exit status | set <mode> | device <ip> <mode|default> | devices | tor-via <warp|provider> | apply | firewall" >&2; exit 2 ;;
 esac

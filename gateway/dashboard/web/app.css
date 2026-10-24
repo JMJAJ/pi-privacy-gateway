@@ -54,6 +54,7 @@ h1, h2 { margin: 0; }
 .seg-btn.on { background: var(--s1); color: #fff; }
 #mode-tor.on { background: var(--tor); }
 #mode-provider.on { background: var(--prov); }
+#mode-ptor.on { background: linear-gradient(90deg, var(--prov), var(--tor)); color: #fff; }
 .seg-btn:disabled { cursor: not-allowed; opacity: .55; }
 .seg.small .seg-btn { padding: 5px 10px; font-size: 13px; }
 

@@ -708,6 +708,10 @@ def quick_mode():
     return m
 
 
+def tor_via():
+    return "provider" if read(f"{CFG}/tor-via", "").strip() == "provider" and os.path.exists(f"{WG_DIR}/wg2.conf") else "warp"
+
+
 def set_mode(mode):
     with _mode_lock:
         out = run(["/usr/local/bin/pgw-exit", "set", mode], timeout=150)
@@ -856,7 +860,7 @@ def snapshot(trusted):
     with _lock:
         s = json.loads(json.dumps(_state, default=str))
     s.update(trusted=trusted, server_time=time.time(), vpn_ip=VPN_IP, vpn_subnet=str(VPN_NET), provider_name=PROVIDER_NAME,
-             device_modes=device_modes(), failover=os.path.exists("/run/pgw/failover"),
+             device_modes=device_modes(), failover=os.path.exists("/run/pgw/failover"), tor_via=tor_via(),
              price=PRICE_DEFAULTS)
     if not trusted:  # LAN viewers: no real IP, no device endpoints
         if s.get("exits", {}).get("isp"):
@@ -903,7 +907,7 @@ class Handler(BaseHTTPRequestHandler):
                      # *.example.com name (to see which resolver the device really uses)
                      ("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; "
                                                  "img-src 'self' data:; frame-ancestors 'none'; connect-src 'self' "
-                                                 "https://1.1.1.1 https://[2606:4700:4700::1111] https://*.example.com")):
+                                                 "https://1.1.1.1 https://ipv6.icanhazip.com https://*.example.com")):
             self.send_header(k, v)
         self.end_headers()
         try:
@@ -984,7 +988,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.trusted():
                 self.send(403, {"error": "connect through the VPN to do this"})
                 return
-            self.send(200, {"country": tor_exit_country(), "options": TOR_COUNTRIES})
+            self.send(200, {"country": tor_exit_country(), "options": TOR_COUNTRIES, "via": tor_via()})
         elif path == "/api/mode":  # cheap, for tray apps
             self.send(200, {"mode": quick_mode(), "kill_switch": (get("killswitch") or {}).get("armed", False),
                             "can_control": self.trusted(), "provider": PROVIDER_NAME if os.path.exists(f"{WG_DIR}/wg2.conf") else None})
@@ -1060,6 +1064,17 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, IndexError):
                 ok = False
             self.send(200 if ok else 500, {"ok": ok, "error": None if ok else "Tor is not reachable"})
+        elif path == "/api/tor/via":
+            body = self.guarded_post()
+            if body is None:
+                return
+            via = body.get("via")
+            if via not in ("warp", "provider"):
+                self.send(400, {"error": "via must be warp or provider"})
+                return
+            with _mode_lock:
+                r = subprocess.run(["/usr/local/bin/pgw-exit", "tor-via", via], capture_output=True, text=True, timeout=150)
+            self.send(200 if r.returncode == 0 else 500, {"ok": r.returncode == 0, "via": tor_via(), "log": (r.stdout + r.stderr).strip()[-300:]})
         elif path == "/api/tor/exit":
             body = self.guarded_post()
             if body is None:
