@@ -415,6 +415,10 @@ function renderAnatomy(mode) {
     html += anatomyBar(`Hop 2 · gateway → ${esc(S.provider_name)}, inside WARP`, `WARP + ${esc(S.provider_name)}`,
       [lan, ...wgPkt('WARP', 'tun'), ...wgPkt(S.provider_name, 'prov'), ...inner, ['your data', 1180, 'pay']],
       `Two WireGuard layers: the outer one (WARP) hides from your ISP that you use ${esc(S.provider_name)}; the inner one hides your destinations from Cloudflare.`);
+  } else if (mode === 'tor' && S.tor_via === 'provider') {
+    html += anatomyBar(`Hop 2 · gateway → Tor guard, inside ${esc(S.provider_name)}, inside WARP`, `WARP + ${esc(S.provider_name)} + TLS + 3 onion layers`,
+      [lan, ...wgPkt('WARP', 'tun'), ...wgPkt(S.provider_name, 'prov'), ...inner, ['TLS', 29, 'tor'], ['cell hdr', 16, 'tor'], ['data (3× onion-encrypted)', 498, 'pay']],
+      `Each Tor cell is encrypted three times, sent over TLS to the guard, wrapped in ${esc(S.provider_name)}'s WireGuard and then in WARP's. Your ISP sees only WARP, Cloudflare only ${esc(S.provider_name)}, ${esc(S.provider_name)} only Tor, the guard only ${esc(S.provider_name)}'s IP.`);
   } else if (mode === 'tor') {
     html += anatomyBar('Hop 2 · gateway → Tor guard, inside WARP', 'WARP + TLS + 3 onion layers',
       [lan, ...wgPkt('WARP', 'tun'), ...inner, ['TLS', 29, 'tor'], ['cell hdr', 16, 'tor'], ['data (3× onion-encrypted)', 498, 'pay']],
@@ -423,7 +427,7 @@ function renderAnatomy(mode) {
     html += anatomyBar('Hop 2 · gateway → Cloudflare WARP', 'encrypted by WireGuard (wg0)', [lan, ...wgPkt('WARP', 'tun'), ...inner, ['your data', 1240, 'pay']],
       'The gateway decrypts Tunnel A, swaps your device address for its WARP address (NAT) and re-encrypts into Tunnel B. Only Cloudflare sees where it goes next.');
   }
-  html += `<div class="anat-legend"><span><span class="sw" style="background:var(--muted)"></span>LAN link</span><span><span class="sw" style="background:var(--s2)"></span>IP / UDP / TCP headers</span><span><span class="sw" style="background:var(--s1)"></span>WireGuard</span>${mode === 'tor' ? '<span><span class="sw" style="background:var(--tor)"></span>Tor</span>' : ''}${mode === 'provider' ? `<span><span class="sw" style="background:var(--prov)"></span>${esc(S.provider_name)}</span>` : ''}<span><span class="sw" style="background:var(--s3)"></span>your data</span></div>`;
+  html += `<div class="anat-legend"><span><span class="sw" style="background:var(--muted)"></span>LAN link</span><span><span class="sw" style="background:var(--s2)"></span>IP / UDP / TCP headers</span><span><span class="sw" style="background:var(--s1)"></span>WireGuard</span>${mode === 'tor' ? '<span><span class="sw" style="background:var(--tor)"></span>Tor</span>' : ''}${mode === 'provider' || (mode === 'tor' && S.tor_via === 'provider') ? `<span><span class="sw" style="background:var(--prov)"></span>${esc(S.provider_name)}</span>` : ''}<span><span class="sw" style="background:var(--s3)"></span>your data</span></div>`;
   $('anatomy').innerHTML = html;
 }
 
@@ -444,16 +448,18 @@ function renderRoute(mode, ex, w, pv, T, hasProv) {
     row('Tor exit', `<span class="mono">${esc(T.exit_ip || '—')}</span>`) +
     row('Your real ISP IP', trusted ? `<span class="mono">${esc(isp.ip || '—')}</span> · ${esc(isp.loc || '')}` : '<span class="muted">hidden on LAN view</span>') +
     row('Your ISP can see', 'encrypted UDP to Cloudflare, amount + timing') +
-    row('Cloudflare can see', tor ? 'your IP + that you use Tor; not the sites' : prov ? `your IP + that you use ${esc(S.provider_name)}; not the sites` : 'your IP + the sites you visit (not HTTPS content)') +
-    (prov ? row(`${esc(S.provider_name)} can see`, 'the sites you visit, but not your IP') : '') + '</div>';
+    row('Cloudflare can see', tor && S.tor_via === 'provider' ? `your IP + that you use ${esc(S.provider_name)}; not that you use Tor, not the sites` : tor ? 'your IP + that you use Tor; not the sites' : prov ? `your IP + that you use ${esc(S.provider_name)}; not the sites` : 'your IP + the sites you visit (not HTTPS content)') +
+    (prov ? row(`${esc(S.provider_name)} can see`, 'the sites you visit, but not your IP') : '') +
+    (tor && S.tor_via === 'provider' ? row(`${esc(S.provider_name)} can see`, 'that you use Tor (encrypted) and Cloudflare’s IP; not your IP, not the sites') : '') +
+    (tor ? row('Tor guard relay sees', S.tor_via === 'provider' ? `${esc(S.provider_name)}’s IP, never yours` : 'Cloudflare’s WARP IP, never yours') : '') + '</div>';
   const items = [['Home router', (lat.router || {}).ms], ['Cloudflare WARP edge', (lat.warp_edge || {}).ms], ['Internet via WARP', (lat.via_warp || {}).ms]];
   if (hasProv) items.push([`Internet via ${S.provider_name}`, (lat.via_provider || {}).ms]);
-  items.push(['Internet direct (ISP)', (lat.isp_internet || {}).ms], ['Tor (connect to 1.1.1.1)', lat.via_tor_connect_ms]);
+  items.push(['Internet direct (ISP)', (lat.isp_internet || {}).ms], [S.tor_via === 'provider' ? `Tor via ${S.provider_name} (TLS to 1.1.1.1)` : 'Tor (TLS to 1.1.1.1)', lat.via_tor_connect_ms]);
   const mx = Math.max(1, ...items.map((i) => i[1] || 0));
   $('latency').innerHTML = items.map(([k, v], i) =>
     `<div class="lat-row"><span>${esc(k)}</span><div class="hbar ${i === items.length - 1 ? 'tor' : ''}"><div style="width:${v ? Math.max(2, (100 * v) / mx) : 0}%"></div></div><span class="n">${v == null ? '—' : num(v, v < 10 ? 1 : 0) + ' ms'}</span></div>`).join('');
   for (const id of ['tor-restart', 'tor-newnym', 'tor-country']) if ($(id)) $(id).hidden = !S.trusted;
-  $('tor-hint').textContent = tor ? 'Your VPN traffic currently flows through this circuit' : 'Not carrying your traffic right now';
+  $('tor-hint').textContent = tor ? (S.tor_via === 'provider' ? `Your VPN traffic flows through this circuit; Tor reaches it through ${S.provider_name}` : 'Your VPN traffic currently flows through this circuit') : 'Not carrying your traffic right now';
   const path = T.path || [];
   $('tor-circuit').innerHTML = (path.length ? '<div class="flow">' + ['<div class="hopbox"><div class="r">You</div><div class="nm">Gateway</div><div class="mono muted">via WARP</div></div>']
     .concat(path.map((h) => `<div class="hopbox"><div class="r">${esc(h.role)}</div><div class="nm">${esc(h.nick)}</div><div class="mono muted">${esc(h.ip || '')} · ${esc(h.country || '??')}</div></div>`))
