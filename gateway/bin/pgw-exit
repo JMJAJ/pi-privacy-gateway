@@ -37,6 +37,10 @@ WARP_FALLBACK='["https://dns.mullvad.net/dns-query"]'
 PROVIDER_UPSTREAMS='["https://dns.mullvad.net/dns-query"]'
 PROVIDER_FALLBACK='["https://dns.quad9.net/dns-query"]'
 DOH_IPS="9.9.9.9 149.112.112.112 194.242.2.2"
+# Blocking public DNS-over-HTTPS endpoints is opt-in: a browser set to "max protection"
+# secure DNS does NOT fall back when its DoH endpoint is unreachable, so on by default it
+# would look like "no internet". Off by default; turn on when devices do not use DoH.
+DOH_BLOCK="${DOH_BLOCK:-off}"
 BRIDGE_FILE="$CFG/tor-bridge"
 TS_IF=tailscale0 TS_NET=100.64.0.0/10 TS_TABLE=52
 ts_on() { [ "${TAILSCALE_EXIT:-off}" = on ]; }
@@ -137,7 +141,7 @@ _firewall() {
   # 3. DNS-over-HTTPS to the big public resolvers: no website lives at these addresses,
   #    so a browser's built-in DoH cannot bypass AdGuard. (The dashboard's own checks run
   #    from the gateway itself, not through PIX_FWD, so they are unaffected.)
-  if ipset -exist create pgw-doh hash:net family inet 2>/dev/null; then
+  if [ "$DOH_BLOCK" = on ] && ipset -exist create pgw-doh hash:net family inet 2>/dev/null; then
     for n in 1.1.1.0/24 8.8.8.0/24 8.8.4.0/24 9.9.9.0/24 149.112.112.0/24 \
              94.140.14.0/24 94.140.15.0/24 208.67.222.0/24 208.67.220.0/24 \
              194.242.2.0/24 45.90.28.0/24 45.90.30.0/24 76.76.2.0/24 76.76.10.0/24; do

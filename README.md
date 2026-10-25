@@ -46,8 +46,9 @@ flowchart LR
   threat alerts in the dashboard and on your phone, and high-severity hits blocked for 24 h automatically. It fails
   open: if Suricata stops, traffic passes uninspected instead of stalling.
 - **30-day history** of throughput, CPU, temperature and power, stored locally in SQLite
-- **Anonymity hardening**: every device lookup is forced through AdGuard (hardcoded DNS, DNS-over-TLS and
-  DNS-over-HTTPS included), OS fingerprints are masked (TTL 64, TCP timestamps stripped, ICMP timestamp and
+- **Anonymity hardening**: every device lookup is forced through AdGuard (hardcoded DNS and DNS-over-TLS
+  included; DoH blocking is an opt-in switch because a browser in max-protection mode cannot fall back).
+  OS fingerprints are masked (TTL 64, TCP timestamps stripped, ICMP timestamp and
   multicast dropped), query-log retention is chooseable, and a **ghost preset** chains WARP → provider → Tor
   over a Snowflake bridge with logging off. An **Anonymity score** on the Security page shows what is actually
   enforced, live.
@@ -189,7 +190,7 @@ around the system resolver:
 | Hardcoded DNS server | DNAT/REDIRECT to AdGuard, so it is still filtered and still resolved inside the tunnel |
 | DNS-over-TLS (port 853) | Refused with a TCP reset; the app falls back to normal DNS |
 | DNS-over-QUIC (port 853/udp) | Refused |
-| DNS-over-HTTPS to a public resolver | The resolver addresses are blocked on 443, and AdGuard answers `0.0.0.0` for the DoH hostnames and for Firefox's `use-application-dns.net` canary |
+| DNS-over-HTTPS to a public resolver | Opt-in `DOH_BLOCK=on`: resolver addresses are blocked on 443 and AdGuard answers `0.0.0.0` for the DoH hostnames. Off by default because a browser set to "max protection" secure DNS refuses to fall back (Firefox's `use-application-dns.net` canary still disables DoH in the default mode) |
 | Android "Private DNS" | The probe is refused instantly instead of hanging, and falls back |
 
 That also means the gateway's own DoH upstream is the only encrypted resolver in play. In WARP mode it is
@@ -230,7 +231,7 @@ single-digit Mbps. `pgw anon status` prints the score and every check as JSON.
 
 ### Anonymity score
 
-The Security page shows a live score: DNS clamp, DoT and DoH blocked, IPv6 rejected, fingerprint masking,
+The Security page shows a live score: DNS clamp, DoT blocked (DoH opt-in), IPv6 rejected, fingerprint masking,
 Tor padding, log retention, exit path and bridge. It is computed from the actual firewall rules and Tor
 config, not from a config file, so a rule that disappeared shows up immediately. The reconcile loop re-arms
 the kill switch and the DNS clamp if anything flushes them.

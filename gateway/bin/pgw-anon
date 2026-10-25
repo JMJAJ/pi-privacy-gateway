@@ -30,6 +30,7 @@ ADGUARD_USER = os.environ.get("ADGUARD_USER", "")
 ADGUARD_PASSWORD = os.environ.get("ADGUARD_PASSWORD", "")
 LOG_MODE = os.environ.get("LOG_MODE", "minimal")
 ONION = os.environ.get("ONION_DASHBOARD", "off")
+DOH_BLOCK = os.environ.get("DOH_BLOCK", "off") == "on"
 RUN = "/run/pgw"
 STATE = os.path.join(RUN, "anon-rules")
 
@@ -125,6 +126,8 @@ def doh_rules(current):
                 skip = False
             continue
         kept.append(line)
+    if not DOH_BLOCK:
+        return kept
     block = [MARK_START] + ["||%s^" % d for d in DOH_DOMAINS] + [MARK_END]
     return kept + block
 
@@ -191,7 +194,8 @@ def status():
     doh = rc(["iptables", "-C", "PIX_FWD", "-i", "wg1", "-p", "tcp", "--dport", "443", "-m", "set",
               "--match-set", "pgw-doh", "dst", "-j", "REJECT", "--reject-with", "tcp-reset"])
     add("doh", 15 if doh else 0, 15, "DNS-over-HTTPS blocked",
-        "public DoH resolvers are unreachable" if doh else "not armed")
+        "public DoH resolvers are unreachable" if doh
+        else "opt-in (DOH_BLOCK=on): browsers in max-protection mode cannot fall back")
 
     v6 = rc(["ip6tables", "-C", "PIX_FWD", "-i", "wg1", "-j", "REJECT"])
     add("ipv6", 10 if v6 else 0, 10, "IPv6 cannot bypass the tunnel",
