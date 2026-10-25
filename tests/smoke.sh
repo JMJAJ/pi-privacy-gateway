@@ -17,6 +17,7 @@ api() { x "curl -s -H 'Content-Type: application/json' -H 'X-Pi-Control: 1' -d '
 waitfor() { for _ in $(seq 1 "$2"); do eval "$1" >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
 
 modprobe wireguard 2>/dev/null || true
+modprobe -a ip_set ip_set_hash_net ip_set_hash_ip xt_set nfnetlink_queue xt_NFQUEUE 2>/dev/null || true
 docker build -q --network host -t "$IMG" gateway >/dev/null || { echo "build failed"; exit 1; }
 docker rm -f "$C" >/dev/null 2>&1
 
@@ -51,6 +52,13 @@ t "Android DoT probe refused instantly"  "x 'iptables -S PIX_IN | grep -q \"dpor
 t "OS fingerprint masked (TTL 64)"        "x 'iptables -t mangle -S PIX_MANGLE | grep -q \"wg1 -j TTL --ttl-set 64\"'"
 t "Tailscale clients under the kill switch" "x 'iptables -S PIX_FWD | grep -q \"\-i tailscale0 -j REJECT\" && ip rule | grep -q \"^97:.*100.64.0.0/10\"'"
 t "Snowflake bridge available, off by default" "x 'test -x /usr/bin/snowflake-client && [ \"\$(pgw-exit tor-bridge status)\" = off ]'"
+echo "threat protection"
+t "known-bad addresses blocked (pgw-bad)"  "x 'iptables -S PIX_FWD | grep -q \"\\-i wg1 -m set --match-set pgw-bad dst -j PGW_THREAT\"'"
+t "auto-blocked addresses blocked (pgw-dyn)" "x 'iptables -S PIX_FWD | grep -q \"\\-i wg1 -m set --match-set pgw-dyn dst -j PGW_THREAT\"'"
+t "a 24 h auto-block can be added"         "x 'ipset -exist add pgw-dyn 203.0.113.9 timeout 60 && ipset test pgw-dyn 203.0.113.9'"
+t "IDS off by default: no inspection hook" "x '! iptables -t mangle -S PGW_IDS && ! pgrep -x suricata && pgrep -f pgw-ids'"
+t "inspection hook is fail-open"           "x 'pgw-ids-hook on && iptables -t mangle -S PGW_IDS | grep -q \"queue-bypass\" && pgw-ids-hook off && ! iptables -t mangle -S PGW_IDS'"
+t "Suricata config builds"                 "x 'pgw-ids-config && grep -q \"repeat-mark\" /run/pgw/ids/pgw.yaml && suricata --build-info | grep -q NFQueue'"
 echo "devices (CLI)"
 t "add-peer creates config + QR"         "x 'pgw add-peer phone && test -s /config/peers/phone.conf && test -s /config/peers/phone.png'"
 t "peer is live with a preshared key"    "x 'wg show wg1 preshared-keys | grep -v none | grep -q .'"
@@ -97,6 +105,7 @@ t "Tor restart works and Tor comes back" "api /api/tor/restart '{}' | grep -q '\
 t "Tor exit country rejects junk"        "api /api/tor/exit '{\"country\":\"xx\"}' | grep -q 'unknown country'"
 t "Tor exit country is saved"            "api /api/tor/exit '{\"country\":\"de\"}' >/dev/null; x 'grep -qx de /config/tor-exit'"
 t "traceroute rejects shell tricks"      "x 'curl -s \"http://127.0.0.1:8080/api/trace?target=1.1.1.1;id\" | grep -q invalid'"
+t "threat API answers (IDS off)"         "x 'curl -sf http://127.0.0.1:8080/api/ids | grep -q \"\\\"enabled\\\": false\"'"
 t "live stream sends data"               "x 'timeout 4 curl -sN http://127.0.0.1:8080/api/stream | grep -q ^data:'"
 
 [ "$fail" -eq 0 ] || dump

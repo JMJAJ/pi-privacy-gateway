@@ -577,12 +577,50 @@ def components():
     comp.update({"Tor": listening(9050), "Tor transparent proxy": listening(9040),
                  "AdGuard DNS": listening(53, "u"), "AdGuard admin": listening(3000),
                  "Kill switch": (get("killswitch") or {}).get("armed", False)})
+    if os.environ.get("THREAT_LISTS", "on") == "on":
+        comp["Threat blocklists"] = "PGW_THREAT" in run(["iptables", "-S", "PIX_FWD"])
+    if IDS_ON:
+        comp["Traffic inspection (IDS)"] = "NFQUEUE" in run(["iptables", "-t", "mangle", "-S", "PGW_IDS"])
     listen = []
     for line in run(["ss", "-H", "-tuln"]).splitlines():
         f = line.split()
         if len(f) >= 5 and not f[4].startswith(("127.", "[::1]")):
             listen.append({"proto": f[0], "addr": f[4]})
     put(components=comp, listening=listen)
+
+
+# ------------------------------------------------------------ threat protection
+IDS_ON = os.environ.get("IDS", "off") == "on"
+IDS_RULES = "/config/ids/suricata/rules/suricata.rules"
+
+
+def ids_state():
+    """Live connections + threat alerts from pgw-idsd, plus engine and blocklist status."""
+    try:
+        with open("/run/pgw/ids/state.json") as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        d = {"connections": [], "alerts": [], "stats": {}, "dyn_blocked": []}
+
+    def num(path):
+        try:
+            return int(read(path))
+        except ValueError:
+            return None
+    rules = rules_updated = None
+    if IDS_ON:
+        try:
+            with open(IDS_RULES) as fh:
+                rules = sum(1 for line in fh if line.startswith("alert"))
+            rules_updated = int(os.path.getmtime(IDS_RULES))
+        except OSError:
+            pass
+    d["status"] = {"enabled": IDS_ON, "lists_enabled": os.environ.get("THREAT_LISTS", "on") == "on",
+                   "engine": IDS_ON and bool(run(["pgrep", "-f", "^suricata -c"], timeout=5)),
+                   "inline": "NFQUEUE" in run(["iptables", "-t", "mangle", "-S", "PGW_IDS"], timeout=5),
+                   "rules": rules, "rules_updated": rules_updated,
+                   "list_entries": num("/config/ids/lists-count"), "lists_updated": num("/config/ids/lists-updated")}
+    return d
 
 
 # ------------------------------------------------------------ on-demand items
@@ -1024,6 +1062,11 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/mode":  # cheap, for tray apps
             self.send(200, {"mode": quick_mode(), "kill_switch": (get("killswitch") or {}).get("armed", False),
                             "can_control": self.trusted(), "provider": PROVIDER_NAME if os.path.exists(f"{WG_DIR}/wg2.conf") else None})
+        elif path == "/api/ids":
+            if not self.trusted():
+                self.send(403, {"error": "connect through the VPN to see connections"})
+            else:
+                self.send(200, ids_state())
         elif path == "/api/querylog":
             if not self.trusted():
                 self.send(403, {"error": "the DNS log is only visible through the VPN"})

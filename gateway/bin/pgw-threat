@@ -1,0 +1,14 @@
+#!/bin/bash
+# pgw-threat - daily jobs for threat protection: malicious-IP blocklists (THREAT_LISTS=on, the default)
+# 3 min after start and then every day; Suricata rule updates every day when IDS=on.
+. /usr/local/bin/pgw-lib
+[ "${THREAT_LISTS:-on}" = on ] || [ "${IDS:-off}" = on ] || { log "threat protection off"; exec sleep infinity; }
+sleep 180
+while true; do
+  [ "${THREAT_LISTS:-on}" = on ] && pgw-threatlists >/dev/null
+  rules="$CFG/ids/suricata/rules/suricata.rules"
+  if [ "${IDS:-off}" = on ] && [ -s "$rules" ] && [ $(( $(date +%s) - $(stat -c %Y "$rules") )) -gt 72000 ]; then
+    pgw-ids-update >/dev/null
+  fi
+  sleep 86400
+done

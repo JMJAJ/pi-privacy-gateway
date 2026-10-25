@@ -40,6 +40,11 @@ flowchart LR
   and move back automatically when it recovers (`EXIT_FAILOVER=warp`, off by default)
 - **Push alerts** to your phone via [ntfy](https://ntfy.sh) when an exit, Tor, DNS or the kill switch breaks, the
   CPU overheats, the power supply sags, the disk fills or the clock drifts — and when it recovers
+- **Threat protection**: devices can't reach known-malicious addresses (Spamhaus DROP, abuse.ch Feodo, Emerging
+  Threats; refreshed daily, on by default). With `IDS=on` (4 GB+ RAM) every device's traffic is also inspected inline
+  by Suricata with the Emerging Threats Open rules, updated daily: live connections (who talks to which website),
+  threat alerts in the dashboard and on your phone, and high-severity hits blocked for 24 h automatically. It fails
+  open: if Suricata stops, traffic passes uninspected instead of stalling.
 - **30-day history** of throughput, CPU, temperature and power, stored locally in SQLite
 - **Built-in leak test**: checks from your own browser that your exit IP, DNS resolver, IPv6 and WebRTC all
   go where the gateway says they should
@@ -138,6 +143,22 @@ NTFY_URL=https://ntfy.sh/pgw-<20 random letters>
 Each check must fail twice in a row before you're told, so short hiccups stay quiet; you get a second message when
 it's fixed. Alerts that can't be sent (the internet is down) are queued and delivered later. Use your own ntfy
 server if you prefer.
+
+## Threat protection
+
+Two layers, both in the kill switch so they apply per device and away from home (Tailscale) too:
+
+| | What it does | Setting |
+|---|---|---|
+| Blocklists | Connections to known-malicious networks are refused and logged. Private ranges, DNS resolvers and your own tunnels' endpoints are never listed, so a bad feed can't cut your internet. | `THREAT_LISTS=on` (default) |
+| Inspection (IDS) | Suricata inspects every packet inline: live connections and threat alerts in the dashboard (*Traffic & threats*), a push alert for high and medium threats, and a 24 h block of the remote address for high ones. | `IDS=on`, needs ~1.5 GB RAM |
+
+`scripts/setup.sh` turns `IDS` on for you on machines with 4 GB or more. The first start downloads the rules (a minute
+or two); traffic is only sent to Suricata once it's ready, and a stopped engine never blocks anything. Encrypted traffic
+stays encrypted: the gateway sees which website (from DNS and the TLS handshake), not the page content.
+
+To see it work, open `http://neverssl.com/pgw-ids-mediumtest` from a device: a medium alert appears in the dashboard
+(the address is not blocked).
 
 ## Leak test
 

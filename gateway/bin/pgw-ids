@@ -1,0 +1,26 @@
+#!/bin/bash
+# pgw-ids - intrusion prevention (Suricata inline, fail-open) for VPN devices' traffic. Opt-in with
+# IDS=on: Suricata with the Emerging Threats Open rules needs ~1.5 GB RAM (a 4 GB+ Raspberry Pi).
+# Run by supervisord; exits when Suricata does, so supervisord restarts both. pgw-threat restarts it
+# after the daily rule update.
+. /usr/local/bin/pgw-lib
+[ "${IDS:-off}" = on ] || { pgw-ids-hook off; exec sleep infinity; }
+DATA="$CFG/ids/suricata"
+mkdir -p "$DATA" /run/pgw/ids
+trap 'pgw-ids-hook off' EXIT
+pgw-ids-hook off
+
+if [ ! -s "$DATA/rules/suricata.rules" ]; then
+  log "IDS: downloading the Emerging Threats Open rules (first start)"
+  until pgw-ids-update --no-restart; do log "IDS: rule download failed - retrying in 2 min"; sleep 120; done
+fi
+pgw-ids-config >/dev/null || { log "IDS: could not build the Suricata config"; sleep 60; exit 1; }
+for _ in $(seq 1 30); do [ -S /run/pgw/ids/eve.sock ] && break; sleep 1; done   # the watcher listens first
+
+rm -f /run/pgw/ids/command.socket
+suricata -c /run/pgw/ids/pgw.yaml -q 0 -q 1 -q 2 -q 3 --pidfile /run/pgw/ids/suricata.pid &
+pid=$!
+pgw-ids-hook wait-on &
+wait "$pid"
+log "IDS: Suricata stopped (exit $?) - traffic passes uninspected until it is back"
+sleep 10

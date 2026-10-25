@@ -1,0 +1,11 @@
+#!/bin/bash
+# pgw-ids-update [--no-restart] - download the latest Emerging Threats Open rules, check that Suricata
+# accepts them, then restart the IDS to load them (traffic keeps flowing: the hook is fail-open).
+. /usr/local/bin/pgw-lib
+DATA="$CFG/ids/suricata"
+mkdir -p "$DATA"
+suricata-update --data-dir "$DATA" --disable-conf /opt/pgw/ids/disable.conf --no-test --no-reload -q || exit 1
+pgw-ids-config >/dev/null || exit 1
+suricata -T -c /run/pgw/ids/pgw.yaml -q 0 >/dev/null 2>&1 || { log "IDS: new rules failed the test - keeping the running ones"; exit 1; }
+log "IDS: rules updated ($(grep -c '^alert' "$DATA/rules/suricata.rules") active)"
+[ "${1:-}" = --no-restart ] || pkill -f '^suricata -c /run/pgw/ids/pgw.yaml' || true

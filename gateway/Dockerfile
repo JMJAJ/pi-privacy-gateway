@@ -1,5 +1,5 @@
 # Pi Privacy Gateway - WireGuard VPN server + exit selection (WARP / any WireGuard
-# provider / Tor) + kill switch + live dashboard, in one host-networked container.
+# provider / Tor) + kill switch + threat protection + live dashboard, in one host-networked container.
 FROM debian:trixie-slim
 
 ARG TARGETARCH
@@ -8,7 +8,7 @@ ARG WGCF_VERSION=2.3.0
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       wireguard-tools iproute2 iptables iputils-ping iw tor curl ca-certificates \
-      python3 dnsutils qrencode procps supervisor tini snowflake-client \
+      python3 dnsutils qrencode procps supervisor tini snowflake-client \n      ipset suricata suricata-update python3-yaml \
  && rm -rf /var/lib/apt/lists/*
 
 # wgcf registers a free Cloudflare WARP account and writes a WireGuard profile for it
@@ -22,6 +22,7 @@ RUN case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
 COPY bin/ /usr/local/bin/
 COPY supervisord.conf /etc/supervisor/conf.d/pgw.conf
 COPY dashboard/ /opt/pgw/dashboard/
+COPY ids/ /opt/pgw/ids/
 RUN chmod 755 /usr/local/bin/pgw*
 
 # WireGuard configs stay at the real /etc/wireguard path: Ubuntu's AppArmor profile for

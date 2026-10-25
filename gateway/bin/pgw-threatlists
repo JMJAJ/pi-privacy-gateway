@@ -1,0 +1,37 @@
+#!/bin/bash
+# pgw-threatlists - refresh known-malicious IP lists into the ipset "pgw-bad" (run daily by pgw-threat).
+# Devices' connections to these addresses are blocked and logged by the kill switch (pgw-exit).
+# Sources (free, widely used): Spamhaus DROP, abuse.ch Feodo Tracker, Emerging Threats compromised IPs.
+# Never lists private ranges or the gateway's own critical servers, so a bad feed can't cut the internet.
+set -uo pipefail
+. /usr/local/bin/pgw-lib
+mkdir -p /run/pgw; exec 9>/run/pgw/threatlists.lock; flock -w 300 9 || exit 1   # one refresh at a time
+STATE="$CFG/ids"; mkdir -p "$STATE"
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+fetch() { curl -fsS -m 60 --retry 3 "$1" -o "$tmp/$2" && log "threat list $2: $(wc -l < "$tmp/$2") lines" || log "could not fetch threat list $2 (keeping the old copy)"; }
+fetch https://www.spamhaus.org/drop/drop.txt spamhaus
+fetch https://feodotracker.abuse.ch/downloads/ipblocklist_recommended.txt feodo
+fetch https://rules.emergingthreats.net/blockrules/compromised-ips.txt et
+# keep the last good copy of a feed that failed today
+for f in spamhaus feodo et; do
+  if [ -s "$tmp/$f" ]; then cp "$tmp/$f" "$STATE/$f.txt"; elif [ -s "$STATE/$f.txt" ]; then cp "$STATE/$f.txt" "$tmp/$f"; fi
+done
+cat "$tmp"/spamhaus "$tmp"/feodo "$tmp"/et 2>/dev/null \
+  | sed 's/[;#].*//' | grep -oE '^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?' \
+  | grep -vE '^(10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|22[4-9]\.|2[3-5][0-9]\.)' \
+  | grep -vE '^(1\.1\.1\.1|1\.0\.0\.1|9\.9\.9\.9|149\.112\.112\.112|194\.242\.2\.2|162\.159\.|172\.64\.|104\.16\.|216\.239\.35\.)' \
+  | sort -u > "$tmp/all"
+# never block the endpoints of our own tunnels
+for c in "$WG/wg0.conf" "$WG/wg2.conf"; do
+  ep=$(cfg_get Endpoint "$c" 2>/dev/null); ep=${ep%:*}
+  [ -n "$ep" ] && { grep -vx "$ep" "$tmp/all" > "$tmp/all2"; mv "$tmp/all2" "$tmp/all"; }
+done
+n=$(wc -l < "$tmp/all")
+[ "$n" -gt 100 ] || { log "only $n threat-list entries - something is wrong, keeping the current list"; exit 1; }
+ipset -exist create pgw-bad hash:net family inet maxelem 262144 || { log "no ipset support on the host - run scripts/setup.sh"; exit 1; }
+ipset -exist create pgw-bad-new hash:net family inet maxelem 262144
+ipset flush pgw-bad-new
+sed 's/^/add pgw-bad-new /' "$tmp/all" | ipset restore -exist
+ipset swap pgw-bad-new pgw-bad && ipset destroy pgw-bad-new
+date +%s > "$STATE/lists-updated"; echo "$n" > "$STATE/lists-count"
+log "threat blocklist active: $n networks/addresses"

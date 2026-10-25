@@ -23,6 +23,10 @@ else
 fi
 # the gateway container is unprivileged, so the host loads the module and sets forwarding once
 echo wireguard > /etc/modules-load.d/pi-privacy-gateway.conf
+# threat protection: IP blocklists (ip_set) and inline inspection (NFQUEUE); optional, so no failure here
+for m in ip_set ip_set_hash_net ip_set_hash_ip xt_set nfnetlink_queue xt_NFQUEUE; do
+  modprobe "$m" 2>/dev/null && echo "$m" >> /etc/modules-load.d/pi-privacy-gateway.conf
+done
 printf 'net.ipv4.ip_forward = 1\nnet.ipv4.conf.all.src_valid_mark = 1\n' > /etc/sysctl.d/99-pi-privacy-gateway.conf
 sysctl -q --system && ok "IP forwarding on, WireGuard module loads at boot"
 
@@ -99,6 +103,10 @@ if [ ! -f .env ]; then
   sed -i "s/^ADGUARD_PASSWORD=.*/ADGUARD_PASSWORD=$(head -c 18 /dev/urandom | base64 | tr -d '/+=')/" .env
   chmod 600 .env
   ok ".env created - use the ADGUARD_PASSWORD in it when you run AdGuard's setup wizard"
+  # traffic inspection (Suricata) needs ~1.5 GB RAM: switch it on only where it fits
+  if [ "$(awk '/^MemTotal/ {print $2}' /proc/meminfo)" -ge 3500000 ]; then
+    sed -i 's/^IDS=.*/IDS=on/' .env && ok "threat inspection (IDS) on: this machine has enough RAM"
+  fi
 else
   ok ".env exists"
 fi

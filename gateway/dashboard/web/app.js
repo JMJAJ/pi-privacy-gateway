@@ -326,15 +326,17 @@ function render() {
 
   const exitIp = tor ? T.exit_ip : prov ? pv.ip : w.ip;
   const exitCc = tor ? ((T.path || []).slice(-1)[0] || {}).country : prov ? pv.loc : w.loc;
+  const threatsN = IDS ? (IDS.alerts || []).filter((a) => a.severity <= 2).length : null;
   $('kpis').innerHTML = [
-    kpi('Websites see', esc(exitIp || '—'), `${chip(tor ? 'tor' : prov ? 'prov' : (w.warp === 'on' ? 'good' : 'crit'), modeName(mode))} ${esc(exitCc || '')}${prov || tor ? ' · inside WARP' : ''}`, 'ip'),
-    kpi('Kill switch', ks.armed ? 'Armed' : 'OFF', `${chip(ks.armed ? 'good' : 'crit', ks.armed ? 'Fail-closed' : 'Leaks possible')} ${(ks.rejected_pkts || 0).toLocaleString()} blocked`),
-    kpi('VPN throughput', fmtBps(down), `↓ download · ↑ ${fmtBps(up)} upload`),
     kpi('Devices online', `${online.length}<small>/ ${peers.length}</small>`, online.map((p) => esc(p.name)).join(', ') || 'none connected'),
+    kpi('VPN throughput', fmtBps(down), `↓ download · ↑ ${fmtBps(up)} upload`),
     kpi('Ads & trackers', dns.blocked_pct != null ? `${dns.blocked_pct}<small>%</small>` : '—', dns.ok ? `${(dns.blocked || 0).toLocaleString()} of ${(dns.queries || 0).toLocaleString()} blocked (24 h)` : 'AdGuard not connected'),
+    kpi('Threats caught', threatsN == null ? '—' : String(threatsN), threatsN ? `${(IDS.dyn_blocked || []).length} blocked right now` : 'nothing suspicious'),
     pw ? kpi('Power (est.)', `${num(pw.total_w, 1)}<small>W</small>`, `≈ ${num(pw.amps_5v, 2)} A at 5 V · ${num(S.temp_c, 0)} °C CPU`)
        : kpi('CPU', `${num((S.cpu || {}).cpu, 0)}<small>%</small>`, `${num(S.temp_c, 0)} °C · load ${esc(((S.system || {}).load || [])[0] || '—')}`),
   ].join('');
+  renderHero(exitIp, exitCc, ks);
+  renderHops(exitIp, online.length);
 
   renderStack(mode, ex, w, pv, T, ks, peers, online, down, dns, hasProv);
   renderAnatomy(mode);
@@ -663,19 +665,24 @@ function renderDevices() {
   if (sig !== devSig) {
     devSig = sig;
     const manage = trusted && DEV.can_manage;
-    $('tbl-peers').innerHTML = '<thead><tr><th>Device</th><th>VPN IP</th><th>Exit</th><th>Connected from</th><th>Last handshake</th><th class="n">↓ now</th><th class="n">↑ now</th><th class="n">↓ total</th><th class="n">↑ total</th>' + (manage ? '<th></th>' : '') + '</tr></thead><tbody>' +
-      (list.length ? list.map((d) => `<tr>
-        <td id="st-${esc(d.name)}"></td><td class="mono">${esc(d.ip)}</td>
-        <td><select class="sel" data-dev="${esc(d.name)}" ${manage ? '' : 'disabled'} aria-label="Exit for ${esc(d.name)}">${exitOptions(d.exit)}</select></td>
-        <td class="mono" id="ep-${esc(d.name)}"></td><td id="hs-${esc(d.name)}"></td>
-        <td class="n" id="dn-${esc(d.name)}"></td><td class="n" id="up-${esc(d.name)}"></td><td class="n" id="td-${esc(d.name)}"></td><td class="n" id="tu-${esc(d.name)}"></td>
-        ${manage ? `<td class="actions"><button class="btn ghost small" data-qr="${esc(d.name)}">QR</button><button class="btn ghost small danger" data-rm="${esc(d.name)}">Remove</button></td>` : ''}</tr>`).join('')
-        : `<tr><td colspan="10" class="muted">No devices yet.${manage ? ' Add one above.' : ''}</td></tr>`) + '</tbody>';
+    $('tbl-peers').innerHTML = list.length ? list.map((d) => `<article class="dev-card">
+      <div class="dev-top"><div class="dev-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="${/pc|desktop|laptop/i.test(d.name) ? 'M3 5h18v11H3zM8 20h8M12 16v4' : 'M7 3h10v18H7zM11 18h2'}"/></svg></div>
+        <div class="dev-name"><b>${esc(d.name)}</b><span class="muted">from <span class="mono" id="ep-${esc(d.name)}"></span></span></div>
+        <span class="dev-state" id="st-${esc(d.name)}"></span></div>
+      <div class="dev-stats">
+        <div><span class="muted">Address</span><span class="mono">${esc(d.ip)}</span></div>
+        <div><span class="muted">Last handshake</span><span id="hs-${esc(d.name)}"></span></div>
+        <div><span class="muted">Now ↓ / ↑</span><span class="mono"><span id="dn-${esc(d.name)}"></span> / <span id="up-${esc(d.name)}"></span></span></div>
+        <div><span class="muted">Total ↓ / ↑</span><span class="mono"><span id="td-${esc(d.name)}"></span> / <span id="tu-${esc(d.name)}"></span></span></div>
+      </div>
+      <div class="dev-actions"><label>Exit <select class="sel" data-dev="${esc(d.name)}" ${manage ? '' : 'disabled'} aria-label="Exit for ${esc(d.name)}">${exitOptions(d.exit)}</select></label>
+        ${manage ? `<span class="spacer"></span><button class="btn ghost small" data-qr="${esc(d.name)}">QR code</button><button class="btn ghost small danger" data-rm="${esc(d.name)}">Remove</button>` : ''}</div>
+    </article>`).join('') : `<p class="muted">No devices yet.${manage ? ' Add one above.' : ''}</p>`;
   }
   const pr = (S && S.peer_rates) || {};
   for (const d of list) {
     const p = live[d.name] || {}, r = pr[d.name] || {}, set = (id, v) => { const el = $(id + '-' + d.name); if (el) el.innerHTML = v; };
-    set('st', chip(isOnline(p) ? 'good' : 'off', d.name));
+    set('st', chip(isOnline(p) ? 'good' : 'off', isOnline(p) ? 'online' : 'offline'));
     set('ep', esc(p.endpoint || (trusted ? '—' : 'hidden')));
     set('hs', ago(p.handshake_age));
     set('dn', fmtBps(r.down_bps)); set('up', fmtBps(r.up_bps)); set('td', fmtBytes(p.tx)); set('tu', fmtBytes(p.rx));
@@ -825,6 +832,116 @@ function connect() {
 }
 setInterval(() => { if (Date.now() - lastMsg > 8000) connect(); }, 4000);
 
+/* ------------------------------------------------------- threat protection + live connections */
+let IDS = null;
+const sevChip = (s) => s === 1 ? chip('crit', 'high') : s === 2 ? chip('warn', 'medium') : chip('off', 'info');
+const hhmmss = (t) => new Date(t * 1000).toLocaleTimeString();
+async function loadIds() {
+  if (!trusted || document.hidden) return;
+  try { IDS = await (await fetch('/api/ids', { cache: 'no-store' })).json(); } catch (_) { return; }
+  renderIds();
+}
+function renderIds() {
+  if (!IDS) return;
+  const st = IDS.status || {}, s = IDS.stats || {};
+  const threats = (IDS.alerts || []).filter((a) => a.severity <= 2).reverse();
+  const info = (IDS.alerts || []).filter((a) => a.severity > 2).reverse();
+  $('conn-card').hidden = !st.enabled;
+  $('ids-status').innerHTML = !st.enabled ? chip('off', 'inspection off') + ' set IDS=on in .env to inspect traffic (needs ~1.5 GB RAM)'
+    : (st.engine && st.inline ? chip('good', 'protecting') : st.engine ? chip('warn', 'starting') : chip('crit', 'engine off - traffic passes uninspected')) +
+    ` ${(st.rules || 0).toLocaleString()} rules, updated ${st.rules_updated ? ago(Date.now() / 1000 - st.rules_updated) : '—'}`;
+  $('ids-kpis').innerHTML = [
+    kpi('Threats caught', threats.length, 'high + medium, kept 500'),
+    kpi('Blocked now', (IDS.dyn_blocked || []).length, 'auto-blocked for 24 h'),
+    kpi('Malicious IPs listed', st.lists_enabled ? (st.list_entries || 0).toLocaleString() : 'off', st.lists_updated ? 'lists updated ' + ago(Date.now() / 1000 - st.lists_updated) : st.lists_enabled ? 'first download ~3 min after start' : 'THREAT_LISTS=off in .env'),
+    kpi('Events inspected', (s.events || 0).toLocaleString(), 'since the watcher started'),
+  ].join('');
+  const arow = (a) => `<tr><td>${hhmmss(a.t)}</td><td>${sevChip(a.severity)}</td><td>${esc(a.signature)}<div class="muted">${esc(a.category || '')}</div></td>
+    <td>${esc(a.device_name || a.device)}</td><td class="mono">${esc(a.remote || '')}${a.remote_port ? ':' + a.remote_port : ''}${a.host ? `<div class="muted">${esc(a.host)}</div>` : ''}</td>
+    <td>${a.action && a.action.startsWith('blocked') ? chip('crit', a.action) : chip('off', 'logged')}</td></tr>`;
+  const head = '<thead><tr><th>Time</th><th>Severity</th><th>What</th><th>Device</th><th>Remote</th><th>Action</th></tr></thead>';
+  $('tbl-threats').innerHTML = head + '<tbody>' + (threats.length ? threats.slice(0, 50).map(arow).join('') : '<tr><td colspan="6" class="muted">Nothing caught. Every connection is checked against the rules as it happens.</td></tr>') + '</tbody>';
+  $('ids-info-sum').textContent = `Informational detections (${info.length})`;
+  const nb = $('nav-badge-traffic'); nb.textContent = threats.length; nb.hidden = !threats.length;
+  $('tbl-info').innerHTML = head + '<tbody>' + info.slice(0, 50).map(arow).join('') + '</tbody>';
+  renderConns();
+}
+function renderConns() {
+  if (!IDS || $('conn-pause').checked) return;
+  const f = $('conn-filter').value.trim().toLowerCase(), dev = $('conn-device').value;
+  const all = (IDS.connections || []).slice().reverse();
+  const devs = [...new Set(all.map((c) => c.device_name || c.device))].sort();
+  const cur = $('conn-device').value;
+  $('conn-device').innerHTML = '<option value="">All devices</option>' + devs.map((d) => `<option${d === cur ? ' selected' : ''}>${esc(d)}</option>`).join('');
+  const rows = all.filter((c) => (!dev || (c.device_name || c.device) === dev) &&
+    (!f || [c.device_name, c.device, c.host, c.remote, String(c.port), c.app].join(' ').toLowerCase().includes(f)));
+  $('conn-count').textContent = `${rows.length} of ${all.length} recent`;
+  const stChip = (c) => c.state === 'blocked' ? chip('crit', 'blocked') : c.state === 'open' ? chip('good', 'open') : c.state === 'no reply' ? chip('warn', 'no reply') : chip('off', 'closed');
+  $('tbl-conns').innerHTML = '<thead><tr><th>Time</th><th>Device</th><th>Website</th><th>Remote</th><th>Protocol</th><th class="n">↑ sent</th><th class="n">↓ received</th><th>State</th></tr></thead><tbody>' +
+    rows.slice(0, 200).map((c) => `<tr><td>${hhmmss(c.t)}</td><td>${esc(c.device_name || c.device)}</td><td>${esc(c.host || '—')}</td>
+      <td class="mono">${esc(c.remote)}:${esc(c.port ?? '')}</td><td>${esc((c.app || c.proto || '').toUpperCase())}</td>
+      <td class="n">${c.state === 'open' ? '…' : fmtBytes(c.out)}</td><td class="n">${c.state === 'open' ? '…' : fmtBytes(c.in)}</td><td>${stChip(c)}</td></tr>`).join('') + '</tbody>';
+}
+$('conn-filter').addEventListener('input', renderConns);
+$('conn-device').addEventListener('change', renderConns);
+setInterval(loadIds, 3000);
+
+/* ------------------------------------------------------- page shell: routing, hero, hop chain */
+const PAGES = {
+  overview: ['Overview', 'Live · updated every second'],
+  traffic: ['Traffic & threats', 'Every device’s traffic, inspected as it passes the gateway'],
+  devices: ['Devices', 'Each device can take its own route out'],
+  route: ['Route & Tor', 'Exit points, Tor circuit, traceroute and leak test'],
+  dns: ['DNS & blocking', 'Every lookup, filtered by AdGuard'],
+  system: ['System & power', 'Health, power and temperature'],
+  security: ['Security', 'Hardening checklist and components'],
+};
+function showPage() {
+  const want = (location.hash || '#overview').slice(1);
+  const page = PAGES[want] ? want : 'overview';
+  document.querySelectorAll('main > .section').forEach((sec) => { sec.hidden = sec.id !== page; });
+  document.querySelectorAll('.side-nav a').forEach((a) => {
+    const on = a.dataset.page === page;
+    a.classList.toggle('on', on);
+    if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+  });
+  $('page-title').textContent = PAGES[page][0];
+  $('page-sub').textContent = PAGES[page][1];
+  document.title = PAGES[page][0] + ' · Pi Privacy Gateway';
+  window.scrollTo(0, 0); setTimeout(() => window.scrollTo(0, 0), 0);
+  requestAnimationFrame(() => charts.forEach((c) => c.draw()));   // charts measure their width when shown
+}
+window.addEventListener('hashchange', showPage);
+const fact = (k, v, s) => `<div class="fact"><span class="muted">${k}</span><b class="mono">${v}</b><span class="muted">${s}</span></div>`;
+function renderHero(exitIp, exitCc, ks) {
+  const tor = S.mode === 'tor', prov = S.mode === 'provider', viaP = tor && S.tor_via === 'provider';
+  const pn = modeName('provider');
+  const route = viaP ? `Tor inside ${pn} inside Cloudflare WARP` : tor ? 'Tor inside Cloudflare WARP' : prov ? `${pn} inside Cloudflare WARP` : 'Cloudflare WARP';
+  const ok = !!ks.armed && !!exitIp;
+  $('hero').className = 'hero ' + (ok ? 'ok' : ks.armed ? 'wait' : 'bad');
+  $('hero-title').textContent = ok ? 'You’re protected' : ks.armed ? 'Waiting for the exit: traffic is held back, nothing leaks' : 'Kill switch is OFF';
+  const st = (IDS && IDS.status) || {};
+  $('hero-text').textContent = `Traffic leaves through ${route}. Kill switch ${ks.armed ? 'armed' : 'off'}${st.engine && st.rules ? `, ${st.rules.toLocaleString()} threat rules inspecting it` : ''}.`;
+  const where = `${viaP ? pn + '+Tor' : modeName(S.mode)}${exitCc ? ' · ' + exitCc : ''}`;
+  $('hero-facts').innerHTML = fact('Websites see', esc(exitIp || '—'), esc(where)) +
+    fact('Your real IP', 'hidden', trusted ? 'never leaves the gateway' : 'open the dashboard through the VPN');
+}
+function renderHops(exitIp, nOnline) {
+  const tor = S.mode === 'tor', prov = S.mode === 'provider', viaP = tor && S.tor_via === 'provider';
+  const lat = S.latency || {}, pn = modeName('provider');
+  const ms = (v) => (v == null ? '—' : num(v, v < 10 ? 1 : 0) + ' ms');
+  const hops = [
+    ['Device', 'Your devices', `${nOnline} online, encrypted`, '', 'dev'],
+    ['Gateway', 'This gateway', 'filters ads, blocks threats', '', 'gw'],
+    ['ISP', 'Your ISP', 'only encrypted WARP traffic', ms((lat.router || {}).ms), 'isp'],
+    ['Tunnel', 'Cloudflare WARP', prov || viaP ? 'your IP, not the sites' : tor ? 'your IP, that you use Tor' : 'your IP and the sites', ms((lat.warp_edge || {}).ms), 'warp'],
+  ];
+  if (prov || viaP) hops.push(['Tunnel', pn, viaP ? 'only that you use Tor' : 'the sites, not your IP', ms((lat.via_provider || {}).ms), 'prov']);
+  if (tor) hops.push(['Onion', 'Tor · 3 relays', 'the sites, not who you are', ms(lat.via_tor_connect_ms), 'tor']);
+  hops.push(['Internet', 'Websites', exitIp ? `see ${exitIp}` : 'waiting…', '', 'net']);
+  $('hops').innerHTML = hops.map(([layer, name, sees, t, cls]) =>
+    `<div class="hop ${cls}"><span class="hop-layer">${layer}</span><b>${esc(name)}</b><span class="muted">${esc(sees)}</span><span class="mono muted">${t}</span></div>`).join('');
+}
 async function loadHistory() {
   try {
     const h = await (await fetch('/api/history', { cache: 'no-store' })).json();
@@ -922,12 +1039,7 @@ async function pollQlog() {
 setInterval(pollQlog, 3000);
 $('qlog-blocked-only').addEventListener('change', pollQlog);
 
-/* ------------------------------------------------------------- tabs/theme */
-const tabLinks = [...document.querySelectorAll('.tabs a')];
-const io = new IntersectionObserver((ents) => {
-  for (const e of ents) if (e.isIntersecting) tabLinks.forEach((a) => a.classList.toggle('active', a.getAttribute('href') === '#' + e.target.id));
-}, { rootMargin: '-40% 0px -55% 0px' });
-document.querySelectorAll('.section').forEach((s) => io.observe(s));
+/* ------------------------------------------------------------------ theme */
 
 function applyTheme(t) { if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme; charts.forEach((c) => c.draw()); }
 try { applyTheme(localStorage.getItem('pi-theme')); } catch (_) { /* storage unavailable */ }
@@ -942,4 +1054,6 @@ $('theme-btn').onclick = () => {
 makeCharts();
 makeHistoryCharts();
 initPrice();
-loadHistory().then(connect).then(() => setTimeout(() => { refreshDevices(); loadHistoryRange(); }, 1500));
+loadHistory().then(connect).then(() => setTimeout(() => { refreshDevices(); loadHistoryRange(); loadIds(); }, 1500));
+showPage();
+window.addEventListener('load', () => setTimeout(() => window.scrollTo(0, 0), 50));
