@@ -18,7 +18,9 @@ chmod 700 "$WG" "$CFG/peers" "$CFG/warp"
 # /config itself: traversable (not listable) so Tor, which runs as its own user, reaches /config/tor;
 # everything secret below it is 0600/0700
 chmod 711 "$CFG"; chmod 600 "$CFG"/provider.conf "$CFG"/history.db "$CFG"/device-modes 2>/dev/null || true
-chown -R debian-tor:debian-tor "$CFG/tor/data" /run/tor && chmod 700 "$CFG/tor/data" && chmod 755 "$CFG/tor"
+mkdir -p "$CFG/tor/onion"
+chown -R debian-tor:debian-tor "$CFG/tor/data" "$CFG/tor/onion" /run/tor
+chmod 700 "$CFG/tor/data" "$CFG/tor/onion" && chmod 755 "$CFG/tor"
 umask 077
 
 [ -f "$WG/wg1.conf" ] || make_server
@@ -28,7 +30,8 @@ make_torrc && chmod 644 "$CFG/tor/torrc"   # no secrets; Tor runs as its own use
 [ -f "$CFG/mode" ] || echo "${DEFAULT_MODE:-warp}" > "$CFG/mode"
 
 # Kill switch BEFORE the VPN server comes up: devices can never leave unprotected.
-pgw-exit firewall
+# If it cannot be armed we must NOT start the VPN server at all (that would be an open gateway).
+pgw-exit firewall || { log "ERROR: the kill switch could not be armed - refusing to start"; exit 1; }
 
 # Interfaces live in the host's network namespace and survive container restarts,
 # so always start from a clean slate. WARP first (the provider tunnel runs inside it).
