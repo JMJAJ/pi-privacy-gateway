@@ -28,12 +28,14 @@ TORVIA_FILE="$CFG/tor-via"            # "provider" = Tor runs through the provid
 ADGUARD_URL="${ADGUARD_URL:-http://127.0.0.1:3000}"
 TOR_TRANS=9040
 TOR_DNS=127.0.0.1:9053
-WARP_UPSTREAMS='["https://dns.quad9.net/dns-query","https://cloudflare-dns.com/dns-query"]'
+# One resolver party per path: fewer companies see the names. The fallback is only used when
+# the primary is unreachable, so in normal operation exactly one party (plus WARP underneath) sees DNS.
+WARP_UPSTREAMS='["https://dns.quad9.net/dns-query"]'
 WARP_FALLBACK='["https://dns.mullvad.net/dns-query"]'
 # provider mode: no Cloudflare resolver (Cloudflare already knows your IP through WARP), and the
 # gateway's own DNS-over-HTTPS connections to these resolvers ride the provider tunnel
-PROVIDER_UPSTREAMS='["https://dns.quad9.net/dns-query","https://dns.mullvad.net/dns-query"]'
-PROVIDER_FALLBACK='["https://dns.mullvad.net/dns-query"]'
+PROVIDER_UPSTREAMS='["https://dns.mullvad.net/dns-query"]'
+PROVIDER_FALLBACK='["https://dns.quad9.net/dns-query"]'
 DOH_IPS="9.9.9.9 149.112.112.112 194.242.2.2"
 BRIDGE_FILE="$CFG/tor-bridge"
 TS_IF=tailscale0 TS_NET=100.64.0.0/10 TS_TABLE=52
@@ -104,6 +106,48 @@ _firewall() {
   iptables -t mangle -C FORWARD -j PIX_MANGLE 2>/dev/null || iptables -t mangle -I FORWARD 1 -j PIX_MANGLE
   iptables -t mangle -A PIX_MANGLE -i wg1 -j TTL --ttl-set 64 2>/dev/null || true
   ts_on && { iptables -t mangle -A PIX_MANGLE -i $TS_IF -j TTL --ttl-set 64 2>/dev/null || true; }
+
+  # ---- anonymity shield ------------------------------------------------------
+  # 1. DNS clamp: every lookup from a device (UDP *and* TCP) is rewritten to AdGuard,
+  #    whatever server the app asked for. A hardcoded 8.8.8.8, a browser's own DoH or
+  #    Android "Private DNS" can no longer resolve around the filter or outside the tunnel.
+  local ifaces=(wg1) i
+  ts_on && ifaces+=("$TS_IF")
+  for i in "${ifaces[@]}"; do
+    iptables -t nat -A PIX_NAT -i "$i" -p udp --dport 53 -j REDIRECT --to-ports 53
+    iptables -t nat -A PIX_NAT -i "$i" -p tcp --dport 53 -j REDIRECT --to-ports 53
+
+    # 2. DNS-over-TLS / DNS-over-QUIC: refuse instantly so the app falls back to the
+    #    clamped plain DNS instead of resolving past the filter.
+    iptables -A PIX_FWD -i "$i" -p tcp --dport 853 -j REJECT --reject-with tcp-reset
+    iptables -A PIX_FWD -i "$i" -p udp --dport 853 -j REJECT
+
+    # 4. TCP timestamps leak the sender's uptime and clock; strip the option so a site
+    #    sees a generic stack (TTL 64 above and MSS clamping complete the picture).
+    iptables -t mangle -A PIX_MANGLE -i "$i" -p tcp -j TCPOPTSTRIP --strip-options timestamp 2>/dev/null \
+      || log "TCPOPTSTRIP unavailable: TCP timestamps not masked"
+
+    # 5. ICMP timestamp queries leak the clock; multicast/broadcast (mDNS, SSDP,
+    #    NetBIOS) has no business leaving the tunnel.
+    iptables -A PIX_FWD -i "$i" -p icmp --icmp-type timestamp-request -j DROP
+    iptables -A PIX_FWD -i "$i" -d 224.0.0.0/4 -j DROP
+    iptables -A PIX_FWD -i "$i" -d 255.255.255.255 -j DROP
+  done
+
+  # 3. DNS-over-HTTPS to the big public resolvers: no website lives at these addresses,
+  #    so a browser's built-in DoH cannot bypass AdGuard. (The dashboard's own checks run
+  #    from the gateway itself, not through PIX_FWD, so they are unaffected.)
+  if ipset -exist create pgw-doh hash:net family inet 2>/dev/null; then
+    for n in 1.1.1.0/24 8.8.8.0/24 8.8.4.0/24 9.9.9.0/24 149.112.112.0/24 \
+             94.140.14.0/24 94.140.15.0/24 208.67.222.0/24 208.67.220.0/24 \
+             194.242.2.0/24 45.90.28.0/24 45.90.30.0/24 76.76.2.0/24 76.76.10.0/24; do
+      ipset -exist add pgw-doh "$n" 2>/dev/null || true
+    done
+    for i in "${ifaces[@]}"; do
+      iptables -A PIX_FWD -i "$i" -p tcp --dport 443 -m set --match-set pgw-doh dst -j REJECT --reject-with tcp-reset
+      iptables -A PIX_FWD -i "$i" -p udp --dport 443 -m set --match-set pgw-doh dst -j REJECT
+    done
+  fi
 
   # threat protection: devices can't reach known-malicious addresses (pgw-bad, refreshed daily by
   # pgw-threatlists) or ones the IDS caught acting badly (pgw-dyn, blocked for 24 h).
@@ -205,8 +249,13 @@ adguard_dns() {
     provider) up=$PROVIDER_UPSTREAMS; fb=$PROVIDER_FALLBACK ;;
     *)        up=$WARP_UPSTREAMS; fb=$WARP_FALLBACK ;;
   esac
+  # Full DNS config on purpose: a partial POST would reset DNSSEC, the anti-fingerprinting
+  # blocked_hosts and the bootstrap resolvers. Bootstrap is Quad9-only (plain, but inside
+  # the tunnel) so Cloudflare is not asked to resolve our resolver's own hostnames.
+  local body
+  body=$(printf '{"upstream_dns":%s,"fallback_dns":%s,"bootstrap_dns":["9.9.9.9","149.112.112.112"],"upstream_mode":"load_balance","protection_enabled":true,"blocking_mode":"default","blocked_response_ttl":10,"blocked_hosts":["version.bind","id.server","hostname.bind"],"dnssec":true,"ipv6_disabled":false,"local_ptr_upstreams":[],"use_private_ptr_resolvers":false}' "$up" "$fb")
   for _ in $(seq 1 30); do
-    adguard_api -H 'Content-Type: application/json' -d "{\"upstream_dns\":$up,\"fallback_dns\":$fb}" \
+    adguard_api -H 'Content-Type: application/json' -d "$body" \
       "$ADGUARD_URL/control/dns_config" >/dev/null && break
     sleep 2
   done || { log "AdGuard API unreachable: DNS upstream unchanged"; return 1; }
@@ -267,6 +316,8 @@ apply() {   # $1 = --nowait: background loop - never stall it waiting for Tor or
   # a newer "pgw-exit set" may have run while we waited for Tor/the provider: it owns DNS now
   [ "$(saved_mode)" = "$default" ] || { log "exit mode changed to $(saved_mode) while waiting - leaving it"; return 0; }
   adguard_dns "$(effective "$default")"
+  # DoH/DoT domain rules, Tor padding and (optionally) the read-only onion dashboard
+  /usr/local/bin/pgw-anon apply >/dev/null 2>&1 || log "pgw-anon apply failed (anonymity rules incomplete)"
   { echo "$default"; overrides; cat /run/pgw/failover 2>/dev/null; } | md5sum | cut -c1-12 > /run/pgw/applied
   log "exit mode: $default$(overrides | awk '{printf " | %s=%s", $1, $2}')"
 }

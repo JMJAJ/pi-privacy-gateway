@@ -46,13 +46,18 @@ flowchart LR
   threat alerts in the dashboard and on your phone, and high-severity hits blocked for 24 h automatically. It fails
   open: if Suricata stops, traffic passes uninspected instead of stalling.
 - **30-day history** of throughput, CPU, temperature and power, stored locally in SQLite
+- **Anonymity hardening**: every device lookup is forced through AdGuard (hardcoded DNS, DNS-over-TLS and
+  DNS-over-HTTPS included), OS fingerprints are masked (TTL 64, TCP timestamps stripped, ICMP timestamp and
+  multicast dropped), query-log retention is chooseable, and a **ghost preset** chains WARP → provider → Tor
+  over a Snowflake bridge with logging off. An **Anonymity score** on the Security page shows what is actually
+  enforced, live.
 - **Built-in leak test**: checks from your own browser that your exit IP, DNS resolver, IPv6 and WebRTC all
   go where the gateway says they should
 - **AdGuard Home** DNS filtering with DNSSEC and encrypted (DoH) upstreams; in Tor mode DNS resolves through Tor too
 - **Live dashboard**: your traffic layer by layer, live throughput per device and interface, Tor circuit with relay
   countries, live traceroute (through WARP *or* along your real ISP path), DNS query log, latency per layer, system
   health, and an estimated power draw and electricity cost on a Raspberry Pi 4. Nothing on the page loads from the
-  internet (the leak test only contacts 1.1.1.1 when you press it).
+  internet (the leak test only contacts Cloudflare's trace endpoint and icanhazip when you press it).
 - **Private by default**: your real IP, the DNS log, traceroute and all controls are only available to devices on the VPN,
   not to everyone on your Wi-Fi; device management can be limited further to your own computer (`ADMIN_IPS`).
   Every control is CSRF-protected.
@@ -116,6 +121,8 @@ docker compose exec gateway pgw remove-peer laptop  # revoke a device
 docker compose exec gateway pgw mode tor            # switch exit for everyone: warp | provider | tor
 docker compose exec gateway pgw device laptop tor   # this device only (back with: default)
 docker compose exec gateway pgw status              # health check
+docker compose exec gateway pgw anon status         # anonymity score + every check
+docker compose exec gateway pgw anon ghost          # strongest preset (triple hop, Snowflake, no logs)
 ```
 
 Device configs (with their private keys) are stored in `data/gateway/peers/`. Keep `data/` private and backed up —
@@ -166,6 +173,88 @@ The dashboard's *Leak test* runs in your browser on the device you want to check
 sees (IPv4 and IPv6) with the exit the gateway assigned to that device, checks that a unique DNS lookup arrived at
 the gateway's own resolver, and lists the addresses WebRTC would reveal to a website.
 
+## Anonymity hardening
+
+The kill switch keeps traffic inside the chosen exit. This layer makes sure nothing *around* the exit gives
+you away.
+
+### DNS cannot leak
+
+Every lookup a device makes is rewritten to AdGuard by the firewall, including one sent straight to
+`8.8.8.8` or `1.1.1.1`. On top of that the gateway blocks the ways a browser or phone tries to resolve
+around the system resolver:
+
+| Bypass | What happens now |
+|---|---|
+| Hardcoded DNS server | DNAT/REDIRECT to AdGuard, so it is still filtered and still resolved inside the tunnel |
+| DNS-over-TLS (port 853) | Refused with a TCP reset; the app falls back to normal DNS |
+| DNS-over-QUIC (port 853/udp) | Refused |
+| DNS-over-HTTPS to a public resolver | The resolver addresses are blocked on 443, and AdGuard answers `0.0.0.0` for the DoH hostnames and for Firefox's `use-application-dns.net` canary |
+| Android "Private DNS" | The probe is refused instantly instead of hanging, and falls back |
+
+That also means the gateway's own DoH upstream is the only encrypted resolver in play. In WARP mode it is
+Quad9; in provider mode it is Mullvad (Cloudflare is not asked to resolve anything). The fallback resolver is
+only used if the primary fails, so in normal operation one resolver party sees the names.
+
+### Fingerprints
+
+- **TTL 64** on every device packet, so a site cannot tell Windows (128) from Android/iOS/Linux (64).
+- **TCP timestamps stripped** (`TCPOPTSTRIP`), removing the uptime/clock fingerprint and the PAWS side channel.
+- **ICMP timestamp** requests dropped, and **multicast/broadcast** (mDNS, SSDP, NetBIOS) never leaves the tunnel.
+- **MSS clamped** to the path MTU, so the TCP stack does not advertise the host's interface MTU.
+
+### Logs
+
+`LOG_MODE` controls how much the gateway itself keeps:
+
+| `LOG_MODE` | AdGuard query log | Dashboard DNS card / leak test |
+|---|---|---|
+| `normal` | 90 days | full |
+| `minimal` (default) | 1 day | full |
+| `none` | disabled | empty; the DNS check reports "cannot tell" |
+
+The 30-day throughput/CPU history is aggregate only (no domains). Device configs, keys and `.env` are never
+part of the logs. Nothing is uploaded anywhere.
+
+### Ghost preset
+
+```bash
+docker compose exec gateway pgw anon ghost     # strongest path, or the button on the Security page
+docker compose exec gateway pgw anon off       # back to normal
+```
+
+Ghost mode sets **WARP → provider → Tor** (three independent operators), switches Tor to the **Snowflake**
+bridge so even the first hop cannot tell it is Tor, and turns the query log off. It takes minutes because
+Snowflake has to find a volunteer proxy; until Tor is ready the kill switch holds traffic back. Expect
+single-digit Mbps. `pgw anon status` prints the score and every check as JSON.
+
+### Anonymity score
+
+The Security page shows a live score: DNS clamp, DoT and DoH blocked, IPv6 rejected, fingerprint masking,
+Tor padding, log retention, exit path and bridge. It is computed from the actual firewall rules and Tor
+config, not from a config file, so a rule that disappeared shows up immediately. The reconcile loop re-arms
+the kill switch and the DNS clamp if anything flushes them.
+
+### Read-only dashboard on Tor (optional)
+
+```bash
+ONION_DASHBOARD=on   # in .env, then docker compose up -d
+```
+
+Tor publishes the dashboard as a v3 `.onion` address (shown on the Security page) that works from anywhere
+without opening a port on your router. It points at a **second, read-only listener**: a visitor can see the
+scrubbed status page but cannot switch exits or manage devices. Nothing else is exposed.
+
+### What this still cannot do
+
+- **Your browser** identifies you more than your IP: cookies, logins, fonts, canvas, screen size. Use Tor
+  Browser for real anonymity; this gateway cannot fix a logged-in profile.
+- **Timing correlation**: a global adversary watching both ends can still correlate traffic volumes. Tor
+  padding makes it harder, not impossible.
+- **WARP alone is not anonymity** (Cloudflare sees your IP). The provider and Tor modes are the private ones.
+- **Your devices' own radios**: a phone that talks to a mesh VPN (Tailscale, Radmin, …) outside the tunnel
+  reveals its address to that service. Pause those when it matters.
+
 ## Adding a VPN provider (Proton, Mullvad, IVPN, …)
 
 1. Download a **WireGuard** configuration from your provider. For Proton VPN:
@@ -210,7 +299,9 @@ The gateway inserts its own chains at the top of the firewall (it never edits yo
 - `PIX_FWD`: traffic from VPN devices may only leave through the active exit (`wg0` WARP or `wg2` provider);
   everything else is rejected. In Tor mode, nothing is forwarded at all: TCP is redirected into Tor's transparent proxy.
 - `PIX_IN`: lets VPN devices reach DNS and the dashboard on the gateway, even if the host firewall denies by default.
-- It is armed *before* the VPN server starts, and re-armed automatically if anything removes it.
+- It is armed *before* the VPN server starts, and re-armed automatically if anything removes it — the
+  reconcile loop checks the kill switch **and** the DNS clamp rules themselves, not just the chain jump.
+- The DNS clamp is rebuilt together with the kill switch, so it cannot fall out of sync with it.
 - Routing rule priorities are fixed (exit selector 95, WARP 98/99), so the order services start in can never send
   traffic to the wrong exit.
 
@@ -263,7 +354,9 @@ This project is for the opposite direction: making your devices' traffic *leave*
   encrypted WireGuard to your home and encrypted traffic to Cloudflare).
 - Sites and ad networks learning your home IP / location (provider or Tor mode).
 - One VPN company holding both your identity and your browsing (provider mode: double hop).
-- Leaks when an exit fails (kill switch), DNS leaks (all DNS forced through AdGuard), IPv6 leaks (blocked).
+- Leaks when an exit fails (kill switch), DNS leaks (every lookup is clamped to AdGuard; plaintext DNS to any server, DoT and DoH to public
+  resolvers are blocked), IPv6 leaks (blocked), OS fingerprinting (TTL and TCP timestamps normalised), and the
+  gateway's own query-log retention (choose 1 day or none).
 - Ads, trackers and malware domains on every device, including ones where you can't install a blocker (TVs, consoles).
 
 **Does not protect against**
@@ -290,7 +383,7 @@ Things worth doing on your own devices (they are outside the gateway's reach):
   `netsh wlan set profileparameter name="<SSID>" randomization=yes`. Your router will hand the device a new address once.
 - **Don't let the PC probe for names.** Windows profiles set to "connect even if not broadcasting" announce that network's name
   everywhere: `netsh wlan set profileparameter name="<SSID>" nonBroadcast=no`.
-- The gateway sets every device's outgoing TTL to 64, so sites can't tell Windows from a phone by it (WARP and
+- The gateway sets every device's outgoing TTL to 64 and strips TCP timestamps, so sites can't tell Windows from a phone by the packet (WARP and
   provider modes; in Tor mode sites only ever see the exit relay's network stack).
 - In provider mode the gateway resolves through Quad9 and Mullvad (no Cloudflare resolver, since Cloudflare
   already knows your IP through WARP), over the provider tunnel.

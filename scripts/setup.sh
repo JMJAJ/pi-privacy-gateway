@@ -24,7 +24,8 @@ fi
 # the gateway container is unprivileged, so the host loads the module and sets forwarding once
 echo wireguard > /etc/modules-load.d/pi-privacy-gateway.conf
 # threat protection: IP blocklists (ip_set) and inline inspection (NFQUEUE); optional, so no failure here
-for m in ip_set ip_set_hash_net ip_set_hash_ip xt_set nfnetlink_queue xt_NFQUEUE; do
+# nft_compat + the xt targets carry the fingerprint masking (TCP timestamps stripped, TTL rewrite)
+for m in ip_set ip_set_hash_net ip_set_hash_ip xt_set nfnetlink_queue xt_NFQUEUE nft_compat xt_TCPOPTSTRIP xt_TTL; do
   modprobe "$m" 2>/dev/null && echo "$m" >> /etc/modules-load.d/pi-privacy-gateway.conf
 done
 printf 'net.ipv4.ip_forward = 1\nnet.ipv4.conf.all.src_valid_mark = 1\n' > /etc/sysctl.d/99-pi-privacy-gateway.conf
