@@ -97,7 +97,10 @@ jobs:
           echo "--- add a device (QR)";  timeout 60 sudo docker exec pgw-gateway pgw add-peer phone >/dev/null && sudo test -s data/gateway/peers/phone.conf
           set -a; . <(sudo cat .env); set +a
           echo "--- AdGuard pre-configured, login from .env works"
-          timeout 60 curl -sf -m 10 -u "$ADGUARD_USER:$ADGUARD_PASSWORD" http://127.0.0.1:3000/control/status | grep -q '"running":true'
-          echo "--- DNS answers through AdGuard"; timeout 60 dig +short +time=5 @127.0.0.1 example.com | grep -qE '^[0-9.]+$'
+          for i in $(seq 1 30); do curl -sf -m 5 -u "$ADGUARD_USER:$ADGUARD_PASSWORD" http://127.0.0.1:3000/control/status | grep -q '"running":true' && break; sleep 2; done
+          curl -sf -m 10 -u "$ADGUARD_USER:$ADGUARD_PASSWORD" http://127.0.0.1:3000/control/status | grep -q '"running":true'
+          echo "--- DNS answers through AdGuard"
+          for i in $(seq 1 15); do dig +short +time=5 @127.0.0.1 example.com | grep -qE '^[0-9.]+$' && break; sleep 2; done
+          dig +short +time=5 @127.0.0.1 example.com | grep -qE '^[0-9.]+$'
           echo "--- clock fallback installed"; timeout 60 systemctl is-enabled pgw-clockfix.service
           echo ALL FIRST-BOOT CHECKS PASSED

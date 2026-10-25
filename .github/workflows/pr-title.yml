@@ -1,0 +1,34 @@
+name: PR title
+
+# Release Please reads the (squash-merged) PR title to pick the next version, so it must start with a type:
+#   feat: new thing (minor)   fix: bug fix (patch)   feat!: breaking change (major)
+#   docs: / ci: / chore: / refactor: / test: / perf: / security: (no release on their own)
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  title:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            perf
+            security
+            docs
+            ci
+            chore
+            refactor
+            test
+            build
+            deps
+          requireScope: false
