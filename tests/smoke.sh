@@ -29,6 +29,7 @@ printf '[Interface]\nPrivateKey = %s\nAddress = 10.2.0.2/32\n[Peer]\nPublicKey =
 docker run -d --name "$C" --cap-add NET_ADMIN --cap-add NET_RAW --security-opt no-new-privileges:true \
   --sysctl net.ipv4.ip_forward=1 --sysctl net.ipv4.conf.all.src_valid_mark=1 \
   -e PGW_TEST=1 -e DASHBOARD_PORT=8080 -e EXIT_FAILOVER=warp -e PROVIDER_NAME=TestVPN -e TAILSCALE_EXIT=on \
+  -e DOH_BLOCK=on \
   -v "$CFGDIR:/config" "$IMG" >/dev/null
 waitfor "x 'ip link show wg1'" 40
 sleep 4
@@ -55,9 +56,9 @@ t "Snowflake bridge available, off by default" "x 'test -x /usr/bin/snowflake-cl
 echo "anonymity shield"
 t "DNS clamp redirects every device lookup"  "x 'iptables -t nat -S PIX_NAT | grep -q \"dport 53 -j REDIRECT --to-ports 53\"'"
 t "DNS-over-TLS is refused"                  "x 'iptables -S PIX_FWD | grep -q \"dport 853 -j REJECT --reject-with tcp-reset\"'"
-t "DNS-over-HTTPS resolvers are blocked"     "x 'iptables -S PIX_FWD | grep -q \"--dport 443.*pgw-doh.*REJECT\"'"
+t "DNS-over-HTTPS resolvers are blocked"     "x 'iptables -S PIX_FWD | grep -q \"dport 443.*pgw-doh.*REJECT\"'"
 t "TCP timestamps are stripped"              "x 'iptables -t mangle -S PIX_MANGLE | grep -q TCPOPTSTRIP'"
-t "ICMP timestamp queries are dropped"       "x 'iptables -S PIX_FWD | grep -q \"icmptype 13 -j DROP\"'"
+t "ICMP timestamp queries are dropped"       "x 'iptables -S PIX_FWD | grep -q \"icmp-type 13 -j DROP\"'"
 t "Tor is padded (ConnectionPadding 1)"      "x 'grep -q \"^ConnectionPadding 1\" /config/tor/torrc'"
 t "anonymity score is reported"              "x 'pgw-anon status --json | grep -q \"\\\"score\\\"\"'"
 t "pgw anon exposes the score"               "x 'pgw anon status --json | grep -q \"\\\"checks\\\"\"'"
