@@ -12,14 +12,26 @@
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-<header class="topbar">
+<div class="app">
+<aside class="sidebar">
   <div class="brand">
     <svg class="logo" viewBox="0 0 512 512" aria-hidden="true"><path d="M256 84 400 140v104c0 92-60 160-144 188-84-28-144-96-144-188V140z" fill="none" stroke="currentColor" stroke-width="34" stroke-linejoin="round"/><circle cx="256" cy="250" r="52" class="logo-dot"/></svg>
-    <div>
-      <div class="brand-name">Pi Privacy Gateway</div>
-      <div class="brand-sub"><span id="host">—</span> · <span id="live" class="live off">connecting</span></div>
-    </div>
+    <div><div class="brand-name">Pi Privacy</div><div class="brand-sub">Gateway</div></div>
   </div>
+  <nav class="side-nav" aria-label="Sections">
+    <a href="#overview" data-page="overview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12 12 4l9 8M5 10v10h14V10"/></svg><span>Overview</span></a>
+    <a href="#traffic" data-page="traffic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17l5-6 4 4 8-9"/></svg><span>Traffic &amp; threats</span><b class="nav-badge" id="nav-badge-traffic" hidden></b></a>
+    <a href="#devices" data-page="devices"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10v18H7zM11 18h2"/></svg><span>Devices</span></a>
+    <a href="#route" data-page="route"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h6v4H4zM14 14h6v4h-6zM10 8h4v8"/></svg><span>Route &amp; Tor</span></a>
+    <a href="#dns" data-page="dns"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3 12h18M12 3c3 3 3 15 0 18"/></svg><span>DNS &amp; blocking</span></a>
+    <a href="#system" data-page="system"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg><span>System &amp; power</span></a>
+    <a href="#security" data-page="security"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5 20 6v6c0 5-3.4 8.6-8 9.5-4.6-.9-8-4.5-8-9.5V6z"/></svg><span>Security</span></a>
+  </nav>
+  <div class="side-foot"><span id="live" class="live off">connecting</span><span class="mono" id="host">—</span></div>
+</aside>
+<div class="main-col">
+<header class="pagebar">
+  <div class="pagebar-title"><h1 id="page-title">Overview</h1><span class="muted" id="page-sub"></span></div>
   <div class="top-actions">
     <div class="seg" role="radiogroup" aria-label="Exit mode">
       <button class="seg-btn" id="mode-warp" role="radio" data-mode="warp">WARP</button>
@@ -30,15 +42,20 @@
     <button class="icon-btn" id="theme-btn" title="Toggle light / dark" aria-label="Toggle theme">◐</button>
   </div>
 </header>
-<nav class="tabs" aria-label="Sections">
-  <a href="#overview">Overview</a><a href="#traffic">Traffic</a><a href="#route">Route</a><a href="#dns">DNS</a><a href="#system">System &amp; power</a><a href="#security">Security</a>
-</nav>
 <div class="banner" id="banner" hidden></div>
-
 <main>
   <!-- ============================== OVERVIEW -->
   <section id="overview" class="section">
+    <div class="hero" id="hero">
+      <div class="hero-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5 20 6v6c0 5-3.4 8.6-8 9.5-4.6-.9-8-4.5-8-9.5V6z"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg></div>
+      <div class="hero-main"><div class="hero-title" id="hero-title">Checking…</div><div class="hero-text" id="hero-text"></div></div>
+      <div class="hero-facts" id="hero-facts"></div>
+    </div>
     <div class="kpis" id="kpis"></div>
+    <div class="card">
+      <div class="card-head"><h2>Your connection, hop by hop</h2><span class="hint">Each layer only knows its neighbours</span></div>
+      <div class="hops" id="hops"></div>
+    </div>
     <div class="grid two overview-grid">
       <div class="card">
         <div class="card-head">
@@ -81,10 +98,27 @@
       </div>
     </div>
     <div class="grid three" id="iface-charts"></div>
+    <div class="card" id="ids-card">
+      <div class="card-head"><h2>Threat protection</h2><span class="hint" id="ids-status">Intrusion prevention (Suricata, Emerging Threats rules) + known-malicious IP lists</span></div>
+      <div class="kpis" id="ids-kpis"></div>
+      <h3 class="sub">Threats <span class="hint">high and medium severity &middot; high ones are blocked for 24 h automatically</span></h3>
+      <div class="table-wrap"><table class="tbl" id="tbl-threats"></table></div>
+      <details class="ids-info"><summary id="ids-info-sum">Informational detections</summary><div class="table-wrap"><table class="tbl" id="tbl-info"></table></div></details>
+    </div>
+    <div class="card" id="conn-card">
+      <div class="card-head"><h2>Live connections</h2><span class="hint">Who talks to what, through the gateway. Website names come from DNS and the encrypted handshake (SNI); page content stays encrypted.</span></div>
+      <div class="conn-tools"><input id="conn-filter" placeholder="filter: device, website, IP, port" spellcheck="false" aria-label="Filter connections"><select id="conn-device" class="sel" aria-label="Device"><option value="">All devices</option></select><label class="conn-pause"><input type="checkbox" id="conn-pause"> pause</label><span class="hint" id="conn-count"></span></div>
+      <div class="table-wrap conn-wrap"><table class="tbl" id="tbl-conns"></table></div>
+    </div>
+
+  </section>
+
+  <!-- ============================== DEVICES -->
+  <section id="devices" class="section">
     <div class="card">
       <div class="card-head"><h2>Devices</h2><span class="hint">Each device can have its own exit</span>
         <form class="dev-add right" id="dev-add" hidden autocomplete="off"><input id="dev-name" placeholder="new device name" maxlength="32" spellcheck="false" aria-label="New device name"><button class="btn" id="dev-add-btn" type="submit">Add device</button></form></div>
-      <div class="table-wrap"><table class="tbl" id="tbl-peers"></table></div>
+      <div class="dev-grid" id="tbl-peers"></div>
     </div>
   </section>
 
@@ -190,6 +224,8 @@
     </div>
   </section>
 </main>
+</div>
+</div>
 <footer class="foot-page">Pi Privacy Gateway · WireGuard · Cloudflare WARP · Tor · AdGuard Home · nothing on this page loads from the internet</footer>
 <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
 <div class="toast" id="toast" role="status" hidden></div>

@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""pgw-idsd - turns Suricata's events into the dashboard's live connections + threat alerts, and protects
+dynamically: a high-severity alert blocks the remote address for 24 h (ipset pgw-dyn, enforced by the
+kill switch). Events arrive on a unix datagram socket, state is kept in RAM (/run), not on the SD card.
+Only runs with IDS=on."""
+import ipaddress
+import json
+import os
+import socket
+import subprocess
+import threading
+import time
+from collections import deque
+
+SOCK = '/run/pgw/ids/eve.sock'
+STATE = '/run/pgw/ids/state.json'
+ALERT_LOG = '/config/ids/alerts.jsonl'             # survives restarts, last 500 alerts
+PUSH_QUEUE = '/config/alert-queue'                  # phone push (ntfy) via pgw-alert
+VPN_PREFIX = os.environ.get('VPN_SUBNET', '10.13.13.0/24').rsplit('.', 1)[0] + '.'
+BLOCK_SECONDS = 86400
+NEVER_BLOCK = [ipaddress.ip_network(n) for n in (
+    '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16',
+    '1.1.1.1/32', '1.0.0.1/32', '9.9.9.9/32', '149.112.112.112/32', '194.242.2.2/32',
+    '162.159.192.0/24', '162.159.193.0/24', '216.239.35.0/24')]
+
+lock = threading.Lock()
+conns = deque(maxlen=400)          # finished + live connections, newest last
+flows = {}                         # flow_id -> connection dict (until the flow ends)
+alerts = deque(maxlen=200)
+stats = {'events': 0, 'alerts': 0, 'auto_blocked': 0, 'started': time.time()}
+names = {}
+bad_nets = []
+notified = {}
+
+
+def external(ip):
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return not any(a in n for n in NEVER_BLOCK) and not a.is_private and not a.is_multicast
+
+
+def refresh_names():
+    """VPN address -> device name, from the '# Name:' comments pgw writes into wg1.conf."""
+    global names
+    n, name = {}, None
+    try:
+        for line in open('/etc/wireguard/wg1.conf').read().splitlines():
+            if line.startswith('# Name: '):
+                name = line[8:].strip()
+            elif line.startswith('AllowedIPs') and name:
+                n[line.split('=', 1)[1].strip().split('/')[0]] = name
+                name = None
+    except OSError:
+        pass
+    names = n
+
+
+def refresh_bad():
+    global bad_nets
+    try:
+        out = subprocess.run(['ipset', 'list', 'pgw-bad'], capture_output=True, text=True, timeout=20).stdout
+        nets = []
+        for line in out.splitlines():
+            line = line.strip()
+            if line and line[0].isdigit():
+                try:
+                    nets.append(ipaddress.ip_network(line.split()[0], strict=False))
+                except ValueError:
+                    pass
+        bad_nets = nets
+    except Exception:
+        pass
+
+
+def dyn_blocked():
+    try:
+        out = subprocess.run(['ipset', 'list', 'pgw-dyn'], capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return []
+    res = []
+    for line in out.splitlines():
+        f = line.split()
+        if f and f[0][0].isdigit() and 'timeout' in f:
+            res.append({'ip': f[0], 'expires_in': int(f[f.index('timeout') + 1])})
+    return res
+
+
+def listed(ip):
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(a in n for n in bad_nets)
+
+
+def device_of(ev):
+    for k in ('src_ip', 'dest_ip'):
+        ip = ev.get(k, '')
+        if ip.startswith(VPN_PREFIX) or ip.startswith('100.'):
+            return ip
+    return ev.get('src_ip', '')
+
+
+def remote_of(ev):
+    s, d = ev.get('src_ip', ''), ev.get('dest_ip', '')
+    return d if device_of(ev) == s else s
+
+
+def notify(prio, msg):
+    if not os.environ.get('NTFY_URL'):
+        return
+    try:
+        with open(PUSH_QUEUE, 'a') as f:
+            f.write(f"{prio}|rotating_light|{time.strftime('%H:%M')}|{msg}\n")
+    except OSError:
+        pass
+
+
+def handle_alert(ev):
+    a = ev.get('alert') or {}
+    sev = int(a.get('severity') or 3)
+    dev = device_of(ev)
+    rem = remote_of(ev)
+    entry = {'t': time.time(), 'severity': sev, 'signature': a.get('signature', '?'), 'sid': a.get('signature_id'),
+             'category': a.get('category', ''), 'device': dev, 'device_name': names.get(dev, dev), 'remote': rem,
+             'remote_port': ev.get('dest_port') if rem == ev.get('dest_ip') else ev.get('src_port'),
+             'proto': ev.get('proto'), 'host': (ev.get('tls') or {}).get('sni') or (ev.get('http') or {}).get('hostname'),
+             'action': 'logged'}
+    # dynamic protection: a high-severity alert blocks the remote address for 24 h
+    if sev == 1 and external(rem):
+        r = subprocess.run(['ipset', '-exist', 'add', 'pgw-dyn', rem, 'timeout', str(BLOCK_SECONDS)], capture_output=True)
+        if r.returncode == 0:
+            entry['action'] = 'blocked 24 h'
+            stats['auto_blocked'] += 1
+    with lock:
+        alerts.append(entry)
+        stats['alerts'] += 1
+    try:
+        with open(ALERT_LOG, 'a') as f:
+            f.write(json.dumps(entry) + '\n')
+    except OSError:
+        pass
+    key = (entry['sid'], rem)
+    if sev <= 2 and time.time() - notified.get(key, 0) > 1800:
+        notified[key] = time.time()
+        what = 'BLOCKED' if entry['action'].startswith('blocked') else 'Detected'
+        notify('high' if sev == 1 else 'default',
+               f"{what}: {entry['signature']} - {entry['device_name']} <-> {rem}{' (' + entry['host'] + ')' if entry['host'] else ''}")
+
+
+def handle(ev):
+    stats['events'] += 1
+    et = ev.get('event_type')
+    if et == 'alert':
+        handle_alert(ev)
+        return
+    fid = ev.get('flow_id')
+    if et in ('tls', 'http', 'dns', 'quic') or (et == 'flow' and fid not in flows):
+        dev = device_of(ev)
+        if not (dev.startswith(VPN_PREFIX) or dev.startswith('100.')):
+            return
+        rem = remote_of(ev)
+        with lock:
+            c = flows.get(fid)
+            if c is None:
+                c = {'t': time.time(), 'device': dev, 'device_name': names.get(dev, dev), 'remote': rem,
+                     'port': ev.get('dest_port'), 'proto': ev.get('proto'), 'app': ev.get('app_proto') or et,
+                     'host': None, 'out': 0, 'in': 0, 'state': 'open', 'blocked': listed(rem)}
+                flows[fid] = c
+                conns.append(c)
+            if et == 'tls':
+                c['host'] = (ev.get('tls') or {}).get('sni') or c['host']; c['app'] = 'tls'
+            elif et == 'http':
+                c['host'] = (ev.get('http') or {}).get('hostname') or c['host']; c['app'] = 'http'
+            elif et == 'dns':
+                q = ev.get('dns') or {}
+                c['host'] = q.get('rrname') or (q.get('queries') or [{}])[0].get('rrname') or c['host']; c['app'] = 'dns'
+            elif et == 'quic':
+                c['host'] = (ev.get('quic') or {}).get('sni') or c['host']; c['app'] = 'quic'
+    if et == 'flow':
+        f = ev.get('flow') or {}
+        with lock:
+            c = flows.pop(fid, None)
+            if c:
+                c['out'] = f.get('bytes_toserver', 0); c['in'] = f.get('bytes_toclient', 0)
+                c['state'] = 'blocked' if c['blocked'] else ('closed' if f.get('state') != 'new' or c['in'] else 'no reply')
+                c['app'] = ev.get('app_proto') or c['app']
+
+
+def writer():
+    n = 0
+    while True:
+        time.sleep(2)
+        n += 1
+        if n % 30 == 1:
+            refresh_names()
+        if n % 150 == 1:
+            refresh_bad()
+        for c in list(flows.values()):           # forget flows Suricata never reported the end of
+            if time.time() - c['t'] > 3600:
+                c['state'] = 'closed'
+        with lock:
+            stale = [k for k, c in flows.items() if time.time() - c['t'] > 3600]
+            for k in stale:
+                flows.pop(k, None)
+            data = {'ts': time.time(), 'stats': dict(stats), 'connections': list(conns)[-300:],
+                    'alerts': list(alerts)[-100:], 'dyn_blocked': dyn_blocked() if n % 5 == 1 else None}
+        if data['dyn_blocked'] is None:
+            try:
+                data['dyn_blocked'] = json.load(open(STATE)).get('dyn_blocked', [])
+            except Exception:
+                data['dyn_blocked'] = []
+        tmp = STATE + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(data, f)
+        os.replace(tmp, STATE)
+
+
+def load_old_alerts():
+    try:
+        lines = open(ALERT_LOG).read().splitlines()[-500:]
+        open(ALERT_LOG, 'w').write('\n'.join(lines) + ('\n' if lines else ''))
+        for line in lines[-200:]:
+            alerts.append(json.loads(line))
+    except (OSError, ValueError):
+        pass
+
+
+def main():
+    if os.environ.get('IDS', 'off') != 'on':
+        while True:
+            time.sleep(86400)
+    os.makedirs('/run/pgw/ids', exist_ok=True)
+    os.makedirs('/config/ids', exist_ok=True)
+    load_old_alerts()
+    if os.path.exists(SOCK):
+        os.unlink(SOCK)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+    s.bind(SOCK)
+    os.chmod(SOCK, 0o660)
+    threading.Thread(target=writer, daemon=True).start()
+    while True:
+        data = s.recv(262144)
+        try:
+            handle(json.loads(data))
+        except Exception:
+            pass
+
+
+if __name__ == '__main__':
+    main()

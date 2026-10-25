@@ -1,0 +1,33 @@
+#!/bin/bash
+# pgw-ids-hook on|off|wait-on - send VPN devices' packets (wg1, and Tailscale with TAILSCALE_EXIT=on)
+# through Suricata. --queue-bypass = fail-open: if Suricata isn't running, packets pass untouched.
+# Packets Suricata has already seen carry mark 0x20000000 and skip the queue (repeat mode).
+. /usr/local/bin/pgw-lib
+Q="NFQUEUE --queue-balance 0:3 --queue-bypass --queue-cpu-fanout"
+M="-m mark ! --mark 0x20000000/0x20000000"
+off() {
+  for c in FORWARD INPUT OUTPUT; do iptables -t mangle -D $c -j PGW_IDS 2>/dev/null; done
+  iptables -t mangle -F PGW_IDS 2>/dev/null; iptables -t mangle -X PGW_IDS 2>/dev/null
+  true
+}
+case "${1:-}" in
+  on)
+    off
+    iptables -t mangle -N PGW_IDS
+    for i in wg1 $([ "${TAILSCALE_EXIT:-off}" = on ] && echo tailscale0); do
+      # shellcheck disable=SC2086
+      iptables -t mangle -A PGW_IDS -i "$i" $M -j $Q
+      # shellcheck disable=SC2086
+      iptables -t mangle -A PGW_IDS -o "$i" $M -j $Q
+    done
+    for c in FORWARD INPUT OUTPUT; do iptables -t mangle -I $c 1 -j PGW_IDS; done
+    log "IDS inspecting VPN traffic (fail-open)" ;;
+  off) off ;;
+  wait-on)   # only send traffic once Suricata is ready: a (re)start never pauses anyone's internet
+    for _ in $(seq 1 120); do
+      suricatasc -c uptime /run/pgw/ids/command.socket >/dev/null 2>&1 && exec "$0" on
+      sleep 3
+    done
+    log "Suricata not ready after 6 min - leaving traffic uninspected"; exit 0 ;;
+  *) echo "usage: pgw-ids-hook on|off|wait-on" >&2; exit 2 ;;
+esac
