@@ -19,9 +19,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: shellcheck
-        run: shellcheck -S warning gateway/bin/* scripts/*.sh scripts/pgw-clockfix image/build.sh tests/*.sh extras/host/pi-ip-failover
+        run: shellcheck -S warning $(grep -lE '^#!/bin/(ba)?sh' gateway/bin/*) scripts/*.sh scripts/pgw-clockfix image/build.sh tests/*.sh extras/host/pi-ip-failover
       - name: python
-        run: python3 -m py_compile gateway/dashboard/dashboard.py
+        run: python3 -m py_compile gateway/dashboard/dashboard.py $(grep -l '^#!/usr/bin/env python3' gateway/bin/*)
       - name: javascript
         run: node --check gateway/dashboard/web/app.js
 
