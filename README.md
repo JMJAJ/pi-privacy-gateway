@@ -413,7 +413,22 @@ The smoke test runs the container unprivileged exactly like `docker-compose.yml`
 WARP and the provider (`PGW_TEST=1`) and never touches the host's own network. It covers the kill switch, per-device
 exits, failover, fail-closed Tor mode and the dashboard API (including CSRF and input validation).
 
-Releases (`v*` tags) publish signed multi-arch images to `ghcr.io/jmjaj/pi-privacy-gateway`. Verify one with:
+### Releases
+
+Releases are automatic. PR titles say what kind of change they are (a check enforces it), and the squash-merged
+title decides the next version:
+
+| PR title starts with | Example | Next version |
+|---|---|---|
+| `fix:` | `fix: dashboard shows the wrong exit` | 1.0.0 → 1.0.1 |
+| `feat:` | `feat: per-site exceptions` | 1.0.0 → 1.1.0 |
+| `feat!:` | `feat!: new config format` | 1.0.0 → 2.0.0 |
+| `docs:` `ci:` `chore:` `refactor:` `test:` | `docs: clearer setup` | no release on its own |
+
+After each merge, Release Please keeps one PR open called `chore(main): release x.y.z` with the version and the
+changelog so far. Merge it when you want to ship: it tags `vX.Y.Z`, writes `CHANGELOG.md`, creates the GitHub release,
+and the release builds attach the SD card image and publish signed multi-arch images to
+`ghcr.io/jmjaj/pi-privacy-gateway`. Pushing a `v*` tag by hand still works too. Verify an image with:
 
 ```bash
 cosign verify ghcr.io/jmjaj/pi-privacy-gateway:latest \

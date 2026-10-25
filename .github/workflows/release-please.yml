@@ -1,0 +1,54 @@
+name: Release Please
+
+# After every merge to main, keeps one "chore(main): release x.y.z" PR open with the next version and a
+# changelog built from the merged PR titles (feat: -> minor, fix: -> patch, feat!: -> major).
+# Merge that PR when you want a release: it tags vX.Y.Z, creates the GitHub release, and the jobs below
+# build, sign and publish the Docker image and attach the SD card image to it.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write        # tags, releases, CHANGELOG.md
+      pull-requests: write   # the release PR
+    outputs:
+      created: ${{ steps.rp.outputs.release_created }}
+      tag: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - id: rp
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # a tag pushed with GITHUB_TOKEN starts no workflows, so the release builds are called from here
+  docker-image:
+    needs: release-please
+    if: needs.release-please.outputs.created == 'true'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag }}
+
+  sd-card-image:
+    needs: release-please
+    if: needs.release-please.outputs.created == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/image.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag }}

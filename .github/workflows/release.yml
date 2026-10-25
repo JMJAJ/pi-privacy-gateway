@@ -9,6 +9,11 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_call:        # from release-please.yml, which creates the tag
+    inputs:
+      tag:
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -22,6 +27,8 @@ jobs:
       id-token: write   # keyless signing
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v3
       - uses: sigstore/cosign-installer@v3
@@ -35,8 +42,8 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{version}},value=${{ inputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.tag }}
             type=raw,value=latest
       - id: build
         uses: docker/build-push-action@v7
