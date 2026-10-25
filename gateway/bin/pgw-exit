@@ -105,6 +105,21 @@ _firewall() {
   iptables -t mangle -A PIX_MANGLE -i wg1 -j TTL --ttl-set 64 2>/dev/null || true
   ts_on && { iptables -t mangle -A PIX_MANGLE -i $TS_IF -j TTL --ttl-set 64 2>/dev/null || true; }
 
+  # threat protection: devices can't reach known-malicious addresses (pgw-bad, refreshed daily by
+  # pgw-threatlists) or ones the IDS caught acting badly (pgw-dyn, blocked for 24 h).
+  # Needs the host's ip_set modules (scripts/setup.sh loads them); skipped if they're missing.
+  if [ "${THREAT_LISTS:-on}" = on ] && ipset -exist create pgw-bad hash:net family inet maxelem 262144 2>/dev/null \
+     && ipset -exist create pgw-dyn hash:ip family inet timeout 86400 2>/dev/null; then
+    iptables -N PGW_THREAT 2>/dev/null || iptables -F PGW_THREAT
+    iptables -A PGW_THREAT -m limit --limit 30/min -j LOG --log-prefix "PGW-THREAT " --log-level 4 2>/dev/null || true
+    iptables -A PGW_THREAT -p tcp -j REJECT --reject-with tcp-reset
+    iptables -A PGW_THREAT -j REJECT
+    for i in wg1 $(ts_on && echo $TS_IF); do
+      iptables -A PIX_FWD -i "$i" -m set --match-set pgw-bad dst -j PGW_THREAT
+      iptables -A PIX_FWD -i "$i" -m set --match-set pgw-dyn dst -j PGW_THREAT
+    done
+  fi
+
   # what VPN devices may reach on the gateway itself (works even if the host runs ufw/firewalld)
   iptables -N PIX_IN 2>/dev/null || iptables -F PIX_IN
   iptables -C INPUT -j PIX_IN 2>/dev/null || iptables -I INPUT 1 -j PIX_IN

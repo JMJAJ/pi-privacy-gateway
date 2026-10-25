@@ -1,0 +1,7 @@
+# Pi Privacy Gateway local rules
+# Safe self-test: any device opening http://example.com/pgw-ids-selftest raises a low-priority alert
+# (proves the engine sees traffic). Not blocked.
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"PGW self-test: intrusion detection is working"; flow:to_server,established; http.uri; content:"/pgw-ids-selftest"; classtype:misc-activity; priority:3; sid:9000001; rev:1;)
+# Safe auto-block test: only this one URL on neverssl.com (a site made for HTTP tests) counts as high severity
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"PGW self-test: high severity (auto-block test)"; flow:to_server,established; http.host; content:"neverssl.com"; http.uri; content:"/pgw-ids-blocktest"; classtype:trojan-activity; priority:1; sid:9000002; rev:1;)
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"PGW self-test: medium severity (alert test)"; flow:to_server,established; http.uri; content:"/pgw-ids-mediumtest"; classtype:policy-violation; priority:2; sid:9000003; rev:1;)
