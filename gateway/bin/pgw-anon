@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""pgw-anon - anonymity hardening for the gateway (stdlib only).
+
+On top of the kill switch this enforces:
+  * DNS clamp        every device lookup is redirected to AdGuard, and DoH/DoT endpoints
+                     are blocked, so a browser cannot resolve around the filter;
+  * log hygiene      query-log retention: normal (90 d) | minimal (1 d, default) | none;
+  * Tor padding      connection padding on, no IPv6 for Tor's own connections, no disk
+                     writes (written into torrc by pgw-lib);
+  * ghost preset     one command for the strongest path: WARP -> provider -> Tor with a
+                     Snowflake bridge and no query log.
+
+Commands:
+  pgw-anon status    machine-readable score + checks (used by the dashboard)
+  pgw-anon apply     (re)apply AdGuard rules and log policy (idempotent)
+  pgw-anon ghost     strongest preset (takes minutes: Snowflake bootstrap)
+  pgw-anon off       back to normal: WARP, no bridge, normal logs
+"""
+import base64
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.request
+
+CFG = os.environ.get("CFG", "/config")
+ADGUARD_URL = os.environ.get("ADGUARD_URL", "http://127.0.0.1:3000")
+ADGUARD_USER = os.environ.get("ADGUARD_USER", "")
+ADGUARD_PASSWORD = os.environ.get("ADGUARD_PASSWORD", "")
+LOG_MODE = os.environ.get("LOG_MODE", "minimal")
+ONION = os.environ.get("ONION_DASHBOARD", "off")
+RUN = "/run/pgw"
+STATE = os.path.join(RUN, "anon-rules")
+
+DOH_DOMAINS = [
+    "use-application-dns.net",       # Firefox canary: answering it disables DoH entirely
+    "mozilla.cloudflare-dns.com", "cloudflare-dns.com",
+    "dns.google", "dns.google.com",
+    "dns.quad9.net", "dns9.quad9.net",
+    "dns.mullvad.net", "doh.mullvad.net",
+    "dns.nextdns.io", "doh.opendns.com",
+    "dns.adguard-dns.com", "dns.adguard.com",
+    "doh.cleanbrowsing.org", "doh.dns.sb", "dns.sb", "doh.libredns.gr",
+    "dns.digitale-gesellschaft.ch", "doh-fi.blahdns.com", "doh-jp.blahdns.com",
+    "doh-de.blahdns.com", "doh.ffmuc.net",
+]
+MARK_START = "! pgw-anon:start - DNS-over-HTTPS endpoints blocked so a browser cannot bypass the gateway resolver"
+MARK_END = "! pgw-anon:end"
+
+
+def read(path, default=""):
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except OSError:
+        return default
+
+
+def write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write(text)
+
+
+def rc(cmd):
+    """True if the exact iptables rule is present."""
+    try:
+        return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5).returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def sh(cmd, timeout=420):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, (p.stdout + p.stderr).strip()
+    except Exception as exc:  # noqa: BLE001
+        return 1, str(exc)
+
+
+def adguard(path, body=None, method=None, timeout=8):
+    auth = base64.b64encode(("%s:%s" % (ADGUARD_USER, ADGUARD_PASSWORD)).encode()).decode()
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(ADGUARD_URL + path, data=data,
+                                 method=method or ("POST" if data is not None else "GET"),
+                                 headers={"Authorization": "Basic " + auth, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode()
+    return json.loads(raw) if raw.strip() else {}
+
+
+def effective_log_mode():
+    """A file written by ghost overrides the environment at runtime."""
+    mode = read(os.path.join(CFG, "log-mode"), "") or LOG_MODE
+    return mode if mode in ("normal", "minimal", "none") else "minimal"
+
+
+def log_policy(mode):
+    if not (ADGUARD_USER and ADGUARD_PASSWORD):
+        return False
+    if mode == "normal":
+        body = {"enabled": True, "interval": 90, "anonymize_client_ip": False}
+    elif mode == "none":
+        body = {"enabled": False, "interval": 1, "anonymize_client_ip": False}
+    else:
+        body = {"enabled": True, "interval": 1, "anonymize_client_ip": False}
+    try:
+        adguard("/control/querylog_config", body)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print("query-log policy not applied: %s" % exc, file=sys.stderr)
+        return False
+
+
+def doh_rules(current):
+    """Replace our own block in the user rules, keep everything the owner wrote."""
+    kept, skip = [], False
+    for line in current:
+        if line.strip().startswith(MARK_START):
+            skip = True
+            continue
+        if skip:
+            if line.strip().startswith(MARK_END):
+                skip = False
+            continue
+        kept.append(line)
+    block = [MARK_START] + ["||%s^" % d for d in DOH_DOMAINS] + [MARK_END]
+    return kept + block
+
+
+def apply():
+    mode = effective_log_mode()
+    ok_logs = log_policy(mode)
+    ok_rules = False
+    if ADGUARD_USER and ADGUARD_PASSWORD:
+        try:
+            status = adguard("/control/filtering/status")
+            rules = doh_rules(list(status.get("user_rules") or []))
+            adguard("/control/filtering/set_rules", {"rules": rules})
+            try:
+                adguard("/control/cache_clear", {}, method="POST")
+            except Exception:  # noqa: BLE001
+                pass
+            ok_rules = True
+        except Exception as exc:  # noqa: BLE001
+            print("DoH filter rules not applied: %s" % exc, file=sys.stderr)
+    write(STATE, json.dumps({"ts": int(time.time()), "log_mode": mode, "rules": ok_rules, "logs": ok_logs}))
+    print(json.dumps({"applied": True, "log_mode": mode, "doh_rules": ok_rules, "log_policy": ok_logs}))
+    return 0 if (ok_rules or not (ADGUARD_USER and ADGUARD_PASSWORD)) else 1
+
+
+def exit_mode():
+    mode = read(os.path.join(CFG, "mode"), "warp")
+    if mode not in ("warp", "provider", "tor"):
+        mode = "warp"
+    if mode == "provider" and os.path.exists("/run/pgw/failover"):
+        mode = "warp"
+    return mode
+
+def status():
+    mode = exit_mode()
+    tor_via = read(os.path.join(CFG, "tor-via"), "")
+    bridge = read(os.path.join(CFG, "tor-bridge"), "")
+    log_mode = effective_log_mode()
+    torrc = read(os.path.join(CFG, "tor", "torrc"), "")
+    onion = read(os.path.join(CFG, "tor", "onion", "hostname"), "")
+    state = {}
+    try:
+        with open(STATE) as fh:
+            state = json.load(fh)
+    except (OSError, ValueError):
+        pass
+
+    checks = []
+
+    def add(cid, points, maximum, label, detail):
+        checks.append({"id": cid, "ok": points >= maximum, "points": points,
+                       "max": maximum, "label": label, "detail": detail})
+
+    dns = rc(["iptables", "-t", "nat", "-C", "PIX_NAT", "-i", "wg1", "-p", "udp", "--dport", "53",
+              "-j", "REDIRECT", "--to-ports", "53"])
+    add("dns_clamp", 15 if dns else 0, 15, "DNS clamp",
+        "every lookup goes to AdGuard, even a hardcoded 8.8.8.8" if dns else "not armed")
+
+    dot = rc(["iptables", "-C", "PIX_FWD", "-i", "wg1", "-p", "tcp", "--dport", "853",
+              "-j", "REJECT", "--reject-with", "tcp-reset"])
+    add("dot", 10 if dot else 0, 10, "DNS-over-TLS blocked",
+        "853/tcp refused, apps use the clamped DNS" if dot else "not armed")
+
+    doh = rc(["iptables", "-C", "PIX_FWD", "-i", "wg1", "-p", "tcp", "--dport", "443", "-m", "set",
+              "--match-set", "pgw-doh", "dst", "-j", "REJECT", "--reject-with", "tcp-reset"])
+    add("doh", 15 if doh else 0, 15, "DNS-over-HTTPS blocked",
+        "public DoH resolvers are unreachable" if doh else "not armed")
+
+    v6 = rc(["ip6tables", "-C", "PIX_FWD", "-i", "wg1", "-j", "REJECT"])
+    add("ipv6", 10 if v6 else 0, 10, "IPv6 cannot bypass the tunnel",
+        "forwarded IPv6 is rejected" if v6 else "not armed")
+
+    ttl = rc(["iptables", "-t", "mangle", "-C", "PIX_MANGLE", "-i", "wg1", "-j", "TTL", "--ttl-set", "64"])
+    ts = rc(["iptables", "-t", "mangle", "-C", "PIX_MANGLE", "-i", "wg1", "-p", "tcp", "-j", "TCPOPTSTRIP",
+             "--strip-options", "timestamp"])
+    fp = 10 if (ttl and ts) else (5 if ttl else 0)
+    add("fingerprint", fp, 10, "OS fingerprint masked",
+        "TTL 64 + TCP timestamps stripped" if (ttl and ts) else ("TTL only" if ttl else "not armed"))
+
+    pad = "ConnectionPadding 1" in torrc
+    add("padding", 5 if pad else 0, 5, "Tor circuit padding", "on" if pad else "off")
+
+    logs_ok = log_mode in ("minimal", "none")
+    log_detail = {"none": "query log disabled", "minimal": "query log kept 1 day",
+                  "normal": "query log kept 90 days"}.get(log_mode, log_mode)
+    add("logs", 10 if logs_ok else 4, 10, "Log hygiene", log_detail)
+
+    exit_pts = {"tor": 20, "provider": 12, "warp": 0}.get(mode, 0)
+    if mode == "tor" and tor_via == "provider":
+        exit_detail = "Tor via the provider (triple hop)"
+    elif mode == "tor":
+        exit_detail = "Tor"
+    elif mode == "provider":
+        exit_detail = "provider (double hop)"
+    else:
+        exit_detail = "WARP sees your IP and destinations"
+    add("exit", exit_pts, 20, "Exit path", exit_detail)
+
+    bridge_ok = bridge == "snowflake"
+    add("bridge", 5 if bridge_ok else 0, 5, "Tor bridge",
+        "Snowflake (looks like a WebRTC call)" if bridge_ok else "none")
+
+    score = sum(c["points"] for c in checks)
+    level = "basic"
+    if score >= 95:
+        level = "ghost"
+    elif score >= 85:
+        level = "extreme"
+    elif score >= 70:
+        level = "strict"
+    return {
+        "score": score, "level": level, "checks": checks,
+        "mode": mode, "tor_via": tor_via or "warp", "bridge": bridge or "off",
+        "log_mode": log_mode, "onion": onion, "onion_enabled": ONION == "on",
+        "rules_applied": bool(state.get("rules")), "rules_ts": state.get("ts"),
+    }
+
+
+def ghost():
+    print("Ghost preset: WARP -> provider -> Tor, Snowflake bridge, no query log.")
+    print("Snowflake can take minutes to find a volunteer proxy; the kill switch holds")
+    print("traffic back the whole time.\n")
+    code = 0
+    if os.path.exists("/etc/wireguard/wg2.conf"):
+        code, out = sh(["/usr/local/bin/pgw-exit", "tor-via", "provider"], timeout=200)
+        tail = out.splitlines()[-1] if out else ""
+        print("[1/4] Tor via the provider: %s - %s" % ("ok" if code == 0 else "failed, keeping WARP", tail))
+    else:
+        print("[1/4] no provider configured: Tor goes straight into WARP (two hops)")
+    code, out = sh(["/usr/local/bin/pgw-exit", "tor-bridge", "snowflake"], timeout=460)
+    tail = out.splitlines()[-1] if out else ""
+    print("[2/4] Snowflake bridge: %s - %s" % ("ok" if code == 0 else "failed, direct path kept", tail))
+    code, out = sh(["/usr/local/bin/pgw-exit", "set", "tor"], timeout=220)
+    tail = out.splitlines()[-1] if out else ""
+    print("[3/4] exit mode tor: %s - %s" % ("ok" if code == 0 else "FAILED, devices stay blocked", tail))
+    write(os.path.join(CFG, "log-mode"), "none")
+    apply()
+    print("[4/4] query log disabled and DoH blocked")
+    print(json.dumps(status(), indent=2))
+    return 0 if code == 0 else 1
+
+
+def off():
+    steps = ((["pgw-exit", "set", "warp"], "exit mode WARP"),
+             (["pgw-exit", "tor-via", "warp"], "Tor via WARP"),
+             (["pgw-exit", "tor-bridge", "off"], "bridge off"))
+    for cmd, label in steps:
+        code, out = sh(["/usr/local/bin/" + cmd[0]] + cmd[1:], timeout=220)
+        tail = out.splitlines()[-1] if out else ""
+        print("%s: %s %s" % (label, "ok" if code == 0 else "failed", tail))
+    try:
+        os.unlink(os.path.join(CFG, "log-mode"))
+    except OSError:
+        pass
+    apply()
+    return 0
+
+
+def main():
+    os.makedirs(RUN, exist_ok=True)
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if cmd == "status":
+        data = status()
+        print(json.dumps(data) if "--json" in sys.argv else json.dumps(data, indent=2))
+        return 0
+    if cmd == "apply":
+        return apply()
+    if cmd == "ghost":
+        return ghost()
+    if cmd == "off":
+        return off()
+    print("usage: pgw-anon status | apply | ghost | off", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

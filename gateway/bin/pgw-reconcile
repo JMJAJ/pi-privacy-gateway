@@ -3,7 +3,7 @@
 # Cheap when everything is fine (a few `ip`/`iptables -C` calls every 5 s).
 # With EXIT_FAILOVER=warp it also moves provider devices to WARP while the provider is down.
 . /usr/local/bin/pgw-lib
-bad=0 good=0
+bad=0 good=0 last_anon=0
 
 provider_healthy() {   # recent handshake on the provider tunnel (keepalive renews it every ~2 min)
   local t; t=$(wg show wg2 latest-handshakes 2>/dev/null | awk '{print $2}' | sort -n | tail -1)
@@ -30,8 +30,17 @@ while true; do
     rm -f /run/pgw/failover
   fi
 
-  if ! iptables -C FORWARD -j PIX_FWD 2>/dev/null; then
-    log "kill switch missing - re-arming"; pgw-exit firewall
+  # Sentinel checks: the jump can exist while the chain itself was flushed, and the DNS
+  # clamp lives in another table. Verify the rules that carry the guarantees, not just the jump.
+  if ! iptables -C FORWARD -j PIX_FWD 2>/dev/null \
+     || ! iptables -C PIX_FWD -i wg1 -j REJECT 2>/dev/null \
+     || ! iptables -t nat -C PIX_NAT -i wg1 -p udp --dport 53 -j REDIRECT --to-ports 53 2>/dev/null; then
+    log "kill switch or DNS clamp missing - re-arming"; pgw-exit firewall
+  fi
+  # AdGuard may come up after the gateway: retry the DoH filter block once a minute until it sticks
+  now=$(date +%s)
+  if [ $((now - last_anon)) -ge 60 ] && ! grep -q '"rules": true' /run/pgw/anon-rules 2>/dev/null; then
+    pgw-anon apply >/dev/null 2>&1; last_anon=$now
   fi
   if [ "$(pgw-exit wanted)" != "$(cat /run/pgw/applied 2>/dev/null)" ]; then
     # rules are fail-closed either way, so don't wait for slow exits here (that would stall failover)

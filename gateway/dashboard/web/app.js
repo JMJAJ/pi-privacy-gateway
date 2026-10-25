@@ -611,8 +611,37 @@ function renderSystem(sys, pw) {
       : `<tr><td><b>${esc(r.iface)}</b>${r.iface === S.uplink ? ' ' + chip('good', 'uplink') : ''}<div class="mono muted">${esc(r.mac || '')}</div></td><td class="mono">${esc(r.ip || '—')}</td><td colspan="7">${r.state === 'up' ? chip('good', 'link up ' + (r.speed ? r.speed + ' Mbit' : '')) : chip('off', 'no cable')}</td></tr>`).join('') + '</tbody>';
 }
 
+function renderAnon() {
+  const A = S.anon || {}, ch = A.checks || [], g = A.ghost || {};
+  const body = $('anon-body');
+  if (!body) return;
+  const score = A.score == null ? 0 : A.score;
+  const tone = score >= 95 ? 'good' : score >= 70 ? 'warn' : 'crit';
+  const hop = A.mode === 'tor' ? (A.tor_via === 'provider' ? 'triple hop' : 'Tor')
+    : A.mode === 'provider' ? 'double hop' : 'Cloudflare sees you';
+  let html = '<div class="kpis small">' +
+    '<div class="kpi"><div class="k">Anonymity score</div><div class="v ' + tone + '">' + score +
+      '<small>/100</small></div><div class="s">' + esc(A.level || '—') + '</div></div>' +
+    '<div class="kpi"><div class="k">Exit</div><div class="v">' + esc((A.mode || '—').toUpperCase()) +
+      '</div><div class="s">' + esc(hop) + '</div></div>' +
+    '<div class="kpi"><div class="k">Query log</div><div class="v">' + esc(A.log_mode || '—') +
+      '</div><div class="s">retention</div></div>' +
+    '</div>';
+  html += '<ul class="checks">' + ch.map(function (c) {
+    return '<li>' + chip(c.ok ? 'good' : 'crit', c.label) + '<span>' + esc(c.detail) +
+      '</span><span class="v">' + (c.points || 0) + '/' + (c.max || 0) + '</span></li>';
+  }).join('') + '</ul>';
+  if (A.onion) html += '<p class="hint">Read-only dashboard over Tor: <b class="mono">' + esc(A.onion) + '</b></p>';
+  if (g.running) html += '<p class="hint">Ghost mode is running (Snowflake can take a few minutes). Traffic stays behind the kill switch.</p>';
+  else if (g.log) html += '<details class="ids-info"><summary>Last ghost run</summary><pre class="mono">' + esc(g.log) + '</pre></details>';
+  body.innerHTML = html;
+  const btn = $('anon-ghost');
+  if (btn) btn.hidden = !trusted || !!g.running;
+}
+
 const PORT_NOTES = { 53: 'DNS · AdGuard', 80: 'This dashboard', 3000: 'AdGuard admin', 9040: 'Tor transparent proxy (VPN devices only)', 51820: 'WireGuard VPN server', 22: 'SSH' };
 function renderSecurity(ks, dns, w, pv, T, hasProv) {
+  renderAnon();
   const C = [];
   const add = (lvl, label, text, val) => C.push(`<li>${chip(lvl, label)}<span>${text}</span><span class="v">${val ?? ''}</span></li>`);
   add(ks.armed ? 'good' : 'crit', ks.armed ? 'Armed' : 'Off', 'Kill switch (fail-closed forwarding)', `${(ks.rejected_pkts || 0).toLocaleString()} rejected`);
@@ -780,7 +809,9 @@ async function runLeakTest() {
   const exp = await (await fetch('/api/leak/expect', { cache: 'no-store' })).json();
   const ispIp = ((S.exits || {}).isp || {}).ip;
   await step('Traffic leaves through the gateway', async () => {
-    const t = await traceVia('https://1.1.1.1/cdn-cgi/trace');
+    // www.cloudflare.com (not the 1.1.1.1 resolver address): the gateway blocks DoH to
+    // public resolvers on purpose, and the trace endpoint must stay reachable.
+    const t = await traceVia('https://www.cloudflare.com/cdn-cgi/trace');
     const ok = t.ip && t.ip !== ispIp && (exp.mode === 'tor' || !exp.ip || t.ip === exp.ip);
     return { ok, detail: `websites see <b class="mono">${esc(t.ip)}</b> (${esc(modeName(exp.mode))}${exp.mode === 'tor' ? ', varies per site' : ''})${t.ip === ispIp ? ' = your REAL IP' : ''}` };
   });
@@ -806,6 +837,21 @@ async function runLeakTest() {
   btn.disabled = false;
 }
 $('leak-run').onclick = runLeakTest;
+
+// Strongest preset: triple hop + Snowflake + no query log. Served by /api/anon/ghost, which
+// starts a background thread (Snowflake bootstrap is slow) and reports progress in the snapshot.
+const ghostBtn = $('anon-ghost');
+if (ghostBtn) ghostBtn.onclick = async function () {
+  ghostBtn.disabled = true;
+  try {
+    const res = await fetch('/api/anon/ghost', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Pi-Control': '1' }, body: '{}' });
+    const j = await res.json().catch(() => ({}));
+    toast(j.ok ? 'Ghost mode started' : (j.error || ('HTTP ' + res.status)), !j.ok);
+  } catch (e) {
+    toast('Ghost mode failed: ' + e.message, true);
+  }
+  ghostBtn.disabled = false;
+};
 
 /* ------------------------------------------------------- electricity cost */
 const priceGet = () => { try { const p = JSON.parse(localStorage.getItem('pgw-price') || 'null'); if (p) return p; } catch (_) { /* default */ } return (S && S.price) || { per_kwh: 0.3, currency: '€' }; };

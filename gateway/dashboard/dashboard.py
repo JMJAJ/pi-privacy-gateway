@@ -567,6 +567,24 @@ def slow():
     put(exits={"warp": warp, "isp": isp, "provider": provider, "tor_ip": tor_exit}, tor=tor, dns=dns, clock_offset_s=clock)
 
 
+_ghost = {"running": False, "log": ""}
+
+
+def run_ghost():
+    """One-click strongest preset: triple hop + Snowflake + no query log. Runs in the
+    background because Snowflake can take minutes to bootstrap."""
+    if _ghost["running"]:
+        return
+    _ghost.update(running=True, log="")
+    try:
+        p = subprocess.run(["/usr/local/bin/pgw-anon", "ghost"], capture_output=True, text=True, timeout=900)
+        _ghost["log"] = (p.stdout + p.stderr).strip()[-800:]
+    except Exception as exc:  # noqa: BLE001
+        _ghost["log"] = "ghost mode failed: %s" % exc
+    finally:
+        _ghost["running"] = False
+
+
 def components():
     def listening(port, proto="t"):
         return f":{port} " in run(["ss", f"-ln{proto}H"]) + " "
@@ -586,7 +604,13 @@ def components():
         f = line.split()
         if len(f) >= 5 and not f[4].startswith(("127.", "[::1]")):
             listen.append({"proto": f[0], "addr": f[4]})
-    put(components=comp, listening=listen)
+    # Anonymity score comes from pgw-anon (single source of truth for the CLI and the page).
+    try:
+        anon = json.loads(run(["/usr/local/bin/pgw-anon", "status", "--json"], timeout=8) or "{}")
+    except ValueError:
+        anon = {}
+    anon["ghost"] = dict(_ghost)
+    put(components=comp, listening=listen, anon=anon)
 
 
 # ------------------------------------------------------------ threat protection
@@ -977,7 +1001,7 @@ class Handler(BaseHTTPRequestHandler):
                      # *.example.com name (to see which resolver the device really uses)
                      ("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; "
                                                  "img-src 'self' data:; frame-ancestors 'none'; connect-src 'self' "
-                                                 "https://1.1.1.1 https://ipv6.icanhazip.com https://*.example.com")):
+                                                 "https://www.cloudflare.com https://ipv6.icanhazip.com https://*.example.com")):
             self.send_header(k, v)
         self.end_headers()
         try:
@@ -1171,6 +1195,14 @@ class Handler(BaseHTTPRequestHandler):
                 f.write(c)
             ok = tor_apply_exit()
             self.send(200 if ok else 500, {"ok": ok, "country": c, "error": None if ok else "Tor is not reachable (saved, will apply when it is)"})
+        elif path == "/api/anon/ghost":
+            if self.guarded_post() is None:
+                return
+            if _ghost["running"]:
+                self.send(409, {"error": "ghost mode is already running"})
+                return
+            threading.Thread(target=run_ghost, daemon=True).start()
+            self.send(200, {"ok": True, "started": True})
         elif path == "/api/leak/dns":
             body = self.guarded_post()
             if body is None:
@@ -1193,6 +1225,20 @@ if __name__ == "__main__":
     loop(30, slow, 300)
     loop(60, tor_apply_exit)       # keeps the chosen exit country applied (also after Tor restarts)
     loop(60, history_sample)       # one row per minute, kept 30 days
+    # Optional Tor onion service: a SECOND listener on loopback that always reports the viewer as
+    # untrusted. A stranger with the .onion address can look at the (scrubbed) dashboard but cannot
+    # switch exits or manage devices. Without this, loopback would be treated as "the host".
+    if os.environ.get("ONION_DASHBOARD", "off") == "on":
+        class ReadOnly(Handler):
+            def trusted(self):
+                return False
+
+            def can_manage(self):
+                return False
+        ro = ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("ONION_READONLY_PORT", "8081"))), ReadOnly)
+        ro.daemon_threads = True
+        threading.Thread(target=ro.serve_forever, daemon=True, name="onion-ro").start()
+
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     srv.daemon_threads = True
     srv.serve_forever()

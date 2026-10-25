@@ -14,6 +14,7 @@ pgw - Pi Privacy Gateway
   pgw mode [warp|provider|tor]   show or switch the default exit for all devices
   pgw device <name> warp|provider|tor|default   give one device its own exit
   pgw status                     health overview
+  pgw anon [status|ghost|off]    anonymity score, ghost preset (triple hop + Snowflake + no logs)
 EOF
 }
 
@@ -125,5 +126,6 @@ case "${1:-}" in
   mode)        if [ -n "${2:-}" ]; then pgw-exit set "$2"; else pgw-exit status; fi ;;
   device)      device_mode "${2:-}" "${3:-}" ;;
   status)      [ "${2:-}" = --quiet ] && status q || status ;;
+  anon)        shift; exec /usr/local/bin/pgw-anon "$@" ;;
   *)           usage ;;
 esac

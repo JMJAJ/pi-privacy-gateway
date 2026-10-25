@@ -17,7 +17,7 @@ api() { x "curl -s -H 'Content-Type: application/json' -H 'X-Pi-Control: 1' -d '
 waitfor() { for _ in $(seq 1 "$2"); do eval "$1" >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
 
 modprobe wireguard 2>/dev/null || true
-modprobe -a ip_set ip_set_hash_net ip_set_hash_ip xt_set nfnetlink_queue xt_NFQUEUE 2>/dev/null || true
+modprobe -a ip_set ip_set_hash_net ip_set_hash_ip xt_set nfnetlink_queue xt_NFQUEUE nft_compat xt_TCPOPTSTRIP xt_TTL 2>/dev/null || true
 docker build -q --network host -t "$IMG" gateway >/dev/null || { echo "build failed"; exit 1; }
 docker rm -f "$C" >/dev/null 2>&1
 
@@ -52,6 +52,15 @@ t "Android DoT probe refused instantly"  "x 'iptables -S PIX_IN | grep -q \"dpor
 t "OS fingerprint masked (TTL 64)"        "x 'iptables -t mangle -S PIX_MANGLE | grep -q \"wg1 -j TTL --ttl-set 64\"'"
 t "Tailscale clients under the kill switch" "x 'iptables -S PIX_FWD | grep -q \"\-i tailscale0 -j REJECT\" && ip rule | grep -q \"^97:.*100.64.0.0/10\"'"
 t "Snowflake bridge available, off by default" "x 'test -x /usr/bin/snowflake-client && [ \"\$(pgw-exit tor-bridge status)\" = off ]'"
+echo "anonymity shield"
+t "DNS clamp redirects every device lookup"  "x 'iptables -t nat -S PIX_NAT | grep -q \"dport 53 -j REDIRECT --to-ports 53\"'"
+t "DNS-over-TLS is refused"                  "x 'iptables -S PIX_FWD | grep -q \"dport 853 -j REJECT --reject-with tcp-reset\"'"
+t "DNS-over-HTTPS resolvers are blocked"     "x 'iptables -S PIX_FWD | grep -q \"--dport 443.*pgw-doh.*REJECT\"'"
+t "TCP timestamps are stripped"              "x 'iptables -t mangle -S PIX_MANGLE | grep -q TCPOPTSTRIP'"
+t "ICMP timestamp queries are dropped"       "x 'iptables -S PIX_FWD | grep -q \"icmptype 13 -j DROP\"'"
+t "Tor is padded (ConnectionPadding 1)"      "x 'grep -q \"^ConnectionPadding 1\" /config/tor/torrc'"
+t "anonymity score is reported"              "x 'pgw-anon status --json | grep -q \"\\\"score\\\"\"'"
+t "pgw anon exposes the score"               "x 'pgw anon status --json | grep -q \"\\\"checks\\\"\"'"
 echo "threat protection"
 t "known-bad addresses blocked (pgw-bad)"  "x 'iptables -S PIX_FWD | grep -q \"\\-i wg1 -m set --match-set pgw-bad dst -j PGW_THREAT\"'"
 t "auto-blocked addresses blocked (pgw-dyn)" "x 'iptables -S PIX_FWD | grep -q \"\\-i wg1 -m set --match-set pgw-dyn dst -j PGW_THREAT\"'"
