@@ -53,7 +53,7 @@ jobs:
         run: |
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --generate-notes
           gh release upload "$TAG" image/pi-privacy-gateway-*.img.xz image/pi-privacy-gateway-*.img.xz.sha256             image/os_list.json image/install-windows.cmd image/install-mac.command image/install-linux.sh --clobber
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: env.RELEASE != 'true'
         with:
           name: sd-card-image
