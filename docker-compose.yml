@@ -4,7 +4,7 @@ services:
   # DNS filter for ads/trackers + encrypted upstream DNS. First run: open http://<host>:3000
   # and finish the setup wizard, then put the admin login into .env (ADGUARD_USER/PASSWORD).
   adguard:
-    image: adguard/adguardhome:v0.107.79
+    image: adguard/adguardhome:v0.107.80
     container_name: pgw-adguard
     network_mode: host
     restart: unless-stopped
